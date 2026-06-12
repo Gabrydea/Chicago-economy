@@ -78,21 +78,10 @@ function euros(n) { return `**${Number(n).toLocaleString("it-IT")} €**`; }
 function err(msg) { return new EmbedBuilder().setColor(0xe74c3c).setTitle("❌ Errore").setDescription(msg); }
 
 // Funzione per generare l'immagine della carta
-async function generateCardImage(user, member, nome, cognome, createdAt, pin) {
+async function generateCardImage(user, member, nome, cognome, createdAt) {
   try {
-    // Scarica l'immagine di background se non esiste
     const bgPath = path.join(__dirname, "chicago-bg.jpg");
-    if (!fs.existsSync(bgPath)) {
-      const https = require("https");
-      await new Promise((resolve, reject) => {
-        const file = fs.createWriteStream(bgPath);
-        https.get("https://i.pinimg.com/originals/2e/4c/7d/2e4c7d8b8e4c7d8b8e4c7d8b8e4c7d8b.jpg", (response) => {
-          response.pipe(file);
-          file.on("finish", () => { file.close(); resolve(); });
-        }).on("error", reject);
-      });
-    }
-
+    
     const canvas = createCanvas(800, 500);
     const ctx = canvas.getContext("2d");
 
@@ -423,7 +412,7 @@ async function handleCommand(interaction) {
     await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
 
     try {
-      const imgBuffer = await generateCardImage(user, member, nome, cognome, acc.created_at, pin);
+      const imgBuffer = await generateCardImage(user, member, nome, cognome, acc.created_at);
       const attachment = new AttachmentBuilder(imgBuffer, { name: "carta.png" });
 
       const showDetailsButton = new ButtonBuilder()
@@ -500,14 +489,13 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         const acc = await getAccount(interaction.user.id, interaction.guildId);
-        const pinDisplay = card.cognome ? `**${interaction.options?.getInteger("pin") || "****"}**` : "Non disponibile";
 
         return interaction.reply({
           embeds: [new EmbedBuilder().setColor(0xD4AF37)
             .setTitle("💳 Dettagli Carta (Privati)")
             .addFields(
               { name: "👤 Nome", value: `${card.nome} ${card.cognome}`, inline: false },
-              { name: "🔐 PIN", value: pinDisplay, inline: false },
+              { name: "🔐 PIN", value: `**${acc.pin_hash ? "Protetto" : "Non impostato"}**`, inline: false },
               { name: "💶 Saldo Conto", value: `**${acc.balance} €**`, inline: false },
               { name: "📅 Data Creazione", value: new Date(card.created_at).toLocaleDateString("it-IT"), inline: false }
             )
