@@ -135,7 +135,7 @@ async function handleCommand(interaction) {
       return interaction.editReply({ embeds: [err("Hai già un conto bancario aperto!")] });
     }
     await query(
-      "INSERT INTO bank_accounts(user_id, guild_id, balance) VALUES($1, $2, 0)",
+      "INSERT INTO bank_accounts(user_id, guild_id, balance) VALUES($1, $2, 500)",
       [user.id, guildId]
     );
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
