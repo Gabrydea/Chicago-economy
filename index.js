@@ -122,6 +122,12 @@ const commands = [
   new SlashCommandBuilder()
     .setName("saldo")
     .setDescription("Controlla il saldo del tuo conto bancario"),
+
+  new SlashCommandBuilder()
+    .setName("tassa")
+    .setDescription("[SOLO STAFF] Applica una tassa a tutti i conti bancari del server")
+    .addIntegerOption(o => o.setName("percentuale").setDescription("Percentuale da tassare (1-50%)").setRequired(true).setMinValue(1).setMaxValue(50))
+    .addStringOption(o => o.setName("motivo").setDescription("Motivo della tassa").setRequired(false)),
 ];
 
 async function handleCommand(interaction) {
@@ -140,7 +146,7 @@ async function handleCommand(interaction) {
     );
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("🏦 Conto Bancario Aperto!")
-      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo.\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile di ${euros(STIPENDIO)}!`)
+      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile di ${euros(STIPENDIO)}!`)
       .setTimestamp()] });
   }
 
@@ -237,6 +243,45 @@ async function handleCommand(interaction) {
       .addFields(
         { name: "Motivo", value: motivo },
         { name: "Saldo residuo", value: euros(vittima.balance - sequestrabile) }
+      ).setTimestamp()] });
+  }
+
+  if (commandName === "tassa") {
+    const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
+    if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi. Richiede il ruolo Staff.")] });
+    const percentuale = interaction.options.getInteger("percentuale", true);
+    const motivo = interaction.options.getString("motivo") ?? "Tassa governativa";
+    const { rows } = await query("SELECT * FROM bank_accounts WHERE guild_id=$1 AND balance > 0", [guildId]);
+    if (!rows.length) return interaction.editReply({ embeds: [err("Nessun conto bancario con fondi trovato.")] });
+    let totaleRaccolto = 0;
+    for (const acc of rows) {
+      const tassa = Math.floor(acc.balance * percentuale / 100);
+      if (tassa <= 0) continue;
+      await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [tassa, acc.user_id, guildId]);
+      await query(
+        "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,NULL,$2,$3,$4,'tassa')",
+        [acc.user_id, guildId, tassa, motivo]
+      );
+      totaleRaccolto += tassa;
+      try {
+        const u = await client.users.fetch(acc.user_id);
+        await u.send({ embeds: [new EmbedBuilder().setColor(0xe67e22)
+          .setTitle("🏛️ Tassa Applicata")
+          .setDescription(`Una tassa del **${percentuale}%** è stata applicata al tuo conto bancario.`)
+          .addFields(
+            { name: "Importo detratto", value: euros(tassa), inline: true },
+            { name: "Saldo rimanente", value: euros(acc.balance - tassa), inline: true },
+            { name: "Motivo", value: motivo }
+          ).setTimestamp()] });
+      } catch {}
+    }
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe67e22)
+      .setTitle("🏛️ Tassa Applicata!")
+      .setDescription(`Tassa del **${percentuale}%** applicata a **${rows.length}** conti bancari.`)
+      .addFields(
+        { name: "Totale raccolto", value: euros(totaleRaccolto), inline: true },
+        { name: "Conti tassati", value: `${rows.length}`, inline: true },
+        { name: "Motivo", value: motivo }
       ).setTimestamp()] });
   }
 
