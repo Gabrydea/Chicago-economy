@@ -1,7 +1,10 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require("discord.js");
 const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
+const { createCanvas, registerFont, loadImage } = require("canvas");
+const fs = require("fs");
+const path = require("path");
 
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => { res.writeHead(200); res.end("Bot online!"); }).listen(PORT, () => {
@@ -49,6 +52,15 @@ async function setupDb() {
     type TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
   )`);
+  await query(`CREATE TABLE IF NOT EXISTS cards (
+    id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    nome TEXT NOT NULL,
+    cognome TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, guild_id)
+  )`);
   console.log("Database pronto.");
 }
 
@@ -57,8 +69,106 @@ async function getAccount(userId, guildId) {
   return rows[0] || null;
 }
 
+async function getCard(userId, guildId) {
+  const { rows } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [userId, guildId]);
+  return rows[0] || null;
+}
+
 function euros(n) { return `**${Number(n).toLocaleString("it-IT")} €**`; }
 function err(msg) { return new EmbedBuilder().setColor(0xe74c3c).setTitle("❌ Errore").setDescription(msg); }
+
+// Funzione per generare l'immagine della carta
+async function generateCardImage(user, member, nome, cognome, createdAt, pin) {
+  try {
+    // Scarica l'immagine di background se non esiste
+    const bgPath = path.join(__dirname, "chicago-bg.jpg");
+    if (!fs.existsSync(bgPath)) {
+      const https = require("https");
+      await new Promise((resolve, reject) => {
+        const file = fs.createWriteStream(bgPath);
+        https.get("https://i.pinimg.com/originals/2e/4c/7d/2e4c7d8b8e4c7d8b8e4c7d8b8e4c7d8b.jpg", (response) => {
+          response.pipe(file);
+          file.on("finish", () => { file.close(); resolve(); });
+        }).on("error", reject);
+      });
+    }
+
+    const canvas = createCanvas(800, 500);
+    const ctx = canvas.getContext("2d");
+
+    // Carica e disegna il background
+    const bgImage = await loadImage(bgPath);
+    ctx.drawImage(bgImage, 0, 0, 800, 500);
+
+    // Overlay scuro
+    ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+    ctx.fillRect(0, 0, 800, 500);
+
+    // Disegna il bordo della carta (oro)
+    ctx.strokeStyle = "#D4AF37";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(15, 15, 770, 470);
+
+    // Carica la foto del profilo Discord
+    const avatarUrl = user.displayAvatarURL({ extension: "png", size: 256 });
+    const avatarImage = await loadImage(avatarUrl);
+
+    // Disegna la foto a destra (circolare)
+    const avatarX = 680;
+    const avatarY = 150;
+    const avatarRadius = 90;
+
+    ctx.beginPath();
+    ctx.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2);
+    ctx.fillStyle = "#D4AF37";
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "#D4AF37";
+    ctx.stroke();
+
+    // Disegna l'avatar dentro il cerchio
+    ctx.beginPath();
+    ctx.arc(avatarX, avatarY, avatarRadius - 4, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(avatarImage, avatarX - avatarRadius + 4, avatarY - avatarRadius + 4, (avatarRadius - 4) * 2, (avatarRadius - 4) * 2);
+    ctx.restore();
+
+    // Testo a sinistra
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = "bold 32px Arial";
+    ctx.fillText(nome, 40, 120);
+
+    ctx.font = "bold 32px Arial";
+    ctx.fillStyle = "#D4AF37";
+    ctx.fillText(cognome, 40, 170);
+
+    // Data di creazione
+    const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT");
+    ctx.font = "16px Arial";
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillText(`Data apertura: ${dataCreazione}`, 40, 250);
+
+    // Username Discord
+    ctx.font = "16px Arial";
+    ctx.fillStyle = "#D4AF37";
+    ctx.fillText(`@${user.username}`, 40, 280);
+
+    // PIN (nascosto con asterischi per l'anteprima)
+    ctx.font = "20px Arial";
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillText("PIN: ****", 40, 350);
+
+    // Logo Chicago Economy Bank
+    ctx.font = "bold 18px Arial";
+    ctx.fillStyle = "#D4AF37";
+    ctx.fillText("Chicago Economy Bank", 40, 450);
+
+    return canvas.toBuffer("image/png");
+  } catch (error) {
+    console.error("Errore nella generazione della carta:", error);
+    throw error;
+  }
+}
 
 async function pagareStipendiGuild(client) {
   const now = new Date();
@@ -128,11 +238,18 @@ const commands = [
     .setDescription("[SOLO STAFF] Applica una tassa a tutti i conti bancari del server")
     .addIntegerOption(o => o.setName("percentuale").setDescription("Percentuale da tassare (1-50%)").setRequired(true).setMinValue(1).setMaxValue(50))
     .addStringOption(o => o.setName("motivo").setDescription("Motivo della tassa").setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName("creacarta")
+    .setDescription("Crea la tua carta Chicago Economy Bank")
+    .addStringOption(o => o.setName("nome").setDescription("Il tuo nome").setRequired(true))
+    .addStringOption(o => o.setName("cognome").setDescription("Il tuo cognome").setRequired(true))
+    .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
 ];
 
 async function handleCommand(interaction) {
   const { commandName, user, guildId, member } = interaction;
-  const ephemeral = ["creapin", "modificapin", "paga"].includes(commandName);
+  const ephemeral = ["creapin", "modificapin", "paga", "creacarta"].includes(commandName);
   await interaction.deferReply({ ephemeral });
 
   if (commandName === "apriconto") {
@@ -146,7 +263,7 @@ async function handleCommand(interaction) {
     );
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("🏦 Conto Bancario Aperto!")
-      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile di ${euros(STIPENDIO)}!`)
+      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile!`)
       .setTimestamp()] });
   }
 
@@ -285,6 +402,53 @@ async function handleCommand(interaction) {
       ).setTimestamp()] });
   }
 
+  if (commandName === "creacarta") {
+    const nome = interaction.options.getString("nome", true).trim();
+    const cognome = interaction.options.getString("cognome", true).trim();
+    const pin = interaction.options.getInteger("pin", true);
+    const acc = await getAccount(user.id, guildId);
+
+    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
+    if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
+    if (hashPin(pin) !== acc.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
+
+    const { rows: existing } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [user.id, guildId]);
+
+    if (existing.length) {
+      await query("UPDATE cards SET nome=$1, cognome=$2 WHERE user_id=$3 AND guild_id=$4", [nome, cognome, user.id, guildId]);
+    } else {
+      await query("INSERT INTO cards(user_id,guild_id,nome,cognome) VALUES($1,$2,$3,$4)", [user.id, guildId, nome, cognome]);
+    }
+
+    await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
+
+    try {
+      const imgBuffer = await generateCardImage(user, member, nome, cognome, acc.created_at, pin);
+      const attachment = new AttachmentBuilder(imgBuffer, { name: "carta.png" });
+
+      const showDetailsButton = new ButtonBuilder()
+        .setCustomId(`mostra_dettagli_${user.id}`)
+        .setLabel("🔐 Mostra Dettagli")
+        .setStyle(ButtonStyle.Primary);
+
+      const row = new ActionRowBuilder().addComponents(showDetailsButton);
+
+      return interaction.editReply({
+        content: "",
+        embeds: [new EmbedBuilder().setColor(0xD4AF37)
+          .setTitle("💳 La Tua Carta Chicago Economy Bank")
+          .setDescription(`${user} la tua carta è pronta!`)
+          .setImage("attachment://carta.png")
+          .setTimestamp()],
+        files: [attachment],
+        components: [row]
+      });
+    } catch (error) {
+      console.error("Errore nella generazione della carta:", error);
+      return interaction.editReply({ embeds: [err("Errore nella generazione della carta. Riprova più tardi.")] });
+    }
+  }
+
   if (commandName === "saldo") {
     const acc = await getAccount(user.id, guildId);
     if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno.")] });
@@ -314,55 +478,54 @@ client.once("ready", async (rc) => {
 });
 
 client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  try { await handleCommand(interaction); }
-  catch (e) {
+  try {
+    if (interaction.isChatInputCommand()) {
+      await handleCommand(interaction);
+    }
+
+    if (interaction.isButton()) {
+      const buttonId = interaction.customId;
+
+      if (buttonId.startsWith("mostra_dettagli_")) {
+        const cardOwnerId = buttonId.split("_")[2];
+        
+        // Controlla se il button è cliccato dal proprietario della carta
+        if (interaction.user.id !== cardOwnerId) {
+          return interaction.reply({ content: "❌ Puoi solo vedere i tuoi dettagli!", ephemeral: true });
+        }
+
+        const card = await getCard(interaction.user.id, interaction.guildId);
+        if (!card) {
+          return interaction.reply({ embeds: [err("Carta non trovata.")] , ephemeral: true });
+        }
+
+        const acc = await getAccount(interaction.user.id, interaction.guildId);
+        const pinDisplay = card.cognome ? `**${interaction.options?.getInteger("pin") || "****"}**` : "Non disponibile";
+
+        return interaction.reply({
+          embeds: [new EmbedBuilder().setColor(0xD4AF37)
+            .setTitle("💳 Dettagli Carta (Privati)")
+            .addFields(
+              { name: "👤 Nome", value: `${card.nome} ${card.cognome}`, inline: false },
+              { name: "🔐 PIN", value: pinDisplay, inline: false },
+              { name: "💶 Saldo Conto", value: `**${acc.balance} €**`, inline: false },
+              { name: "📅 Data Creazione", value: new Date(card.created_at).toLocaleDateString("it-IT"), inline: false }
+            )
+            .setThumbnail(interaction.user.displayAvatarURL())
+            .setTimestamp()],
+          ephemeral: true
+        });
+      }
+    }
+  } catch (e) {
     console.error(e);
     const msg = "Si è verificato un errore. Riprova.";
-    if (interaction.replied || interaction.deferred) interaction.followUp({ content: msg, ephemeral: true }).catch(() => {});
-    else interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
+    if (interaction.replied || interaction.deferred) {
+      interaction.followUp({ content: msg, ephemeral: true }).catch(() => {});
+    } else {
+      interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
+    }
   }
 });
 
 client.login(token);
-Diff: index.js
-
-
-bot-standalone/index.js
--0+24
-
-
-      ).setTimestamp()] });}
-if (commandName === "creacarta") {
-const nome = interaction.options.getString("nome", true).trim();
-const cognome = interaction.options.getString("cognome", true).trim();
-const pin = interaction.options.getInteger("pin", true);
-const acc = await getAccount(user.id, guildId);
-
-if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
-if (hashPin(pin) !== acc.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
-
-const { rows: existing } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [user.id, guildId]);
-
-if (existing.length) {
-
-await query("UPDATE cards SET nome=$1, cognome=$2 WHERE user_id=$3 AND guild_id=$4", [nome, cognome, user.id, guildId]);} else {
-await query("INSERT INTO cards(user_id,guild_id,nome,cognome) VALUES($1,$2,$3,$4)", [user.id, guildId, nome, cognome]);}
-await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
-
-const imgBuffer = await generateCardImage(user, member, nome, cognome, acc.created_at);
-const attachment = new AttachmentBuilder(imgBuffer, { name: "carta.png" });
-
-return interaction.editReply({ content: "", embeds: [new EmbedBuilder().setColor(0xD4AF37)
-
-.setTitle("💳 La Tua Carta Chicago Economy Bank")
-.setDescription(`${user} la tua carta è pronta!`)
-.setImage("attachment://carta.png")
-.setTimestamp()], files: [attachment] });}
-
-if (commandName === "saldo") {
-
-const acc = await getAccount(user.id, guildId);
-
-if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno.")] });
