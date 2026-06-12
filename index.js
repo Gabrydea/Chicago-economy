@@ -325,3 +325,44 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.login(token);
+Diff: index.js
+
+
+bot-standalone/index.js
+-0+24
+
+
+      ).setTimestamp()] });}
+if (commandName === "creacarta") {
+const nome = interaction.options.getString("nome", true).trim();
+const cognome = interaction.options.getString("cognome", true).trim();
+const pin = interaction.options.getInteger("pin", true);
+const acc = await getAccount(user.id, guildId);
+
+if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
+if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
+if (hashPin(pin) !== acc.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
+
+const { rows: existing } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [user.id, guildId]);
+
+if (existing.length) {
+
+await query("UPDATE cards SET nome=$1, cognome=$2 WHERE user_id=$3 AND guild_id=$4", [nome, cognome, user.id, guildId]);} else {
+await query("INSERT INTO cards(user_id,guild_id,nome,cognome) VALUES($1,$2,$3,$4)", [user.id, guildId, nome, cognome]);}
+await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
+
+const imgBuffer = await generateCardImage(user, member, nome, cognome, acc.created_at);
+const attachment = new AttachmentBuilder(imgBuffer, { name: "carta.png" });
+
+return interaction.editReply({ content: "", embeds: [new EmbedBuilder().setColor(0xD4AF37)
+
+.setTitle("💳 La Tua Carta Chicago Economy Bank")
+.setDescription(`${user} la tua carta è pronta!`)
+.setImage("attachment://carta.png")
+.setTimestamp()], files: [attachment] });}
+
+if (commandName === "saldo") {
+
+const acc = await getAccount(user.id, guildId);
+
+if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno.")] });
