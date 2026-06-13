@@ -178,25 +178,25 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   accent.addColorStop(0, "#f5d76e");
   accent.addColorStop(1, "#D4AF37");
   ctx.fillStyle = accent;
-  ctx.font = "bold 22px Arial";
+  ctx.font = "bold 22px sans-serif";
   ctx.fillText("CHICAGO CITY RP", 48, 72);
   ctx.fillStyle = "rgba(212, 175, 55, 0.85)";
-  ctx.font = "14px Arial";
+  ctx.font = "14px sans-serif";
   ctx.fillText(isPublic ? "CARTA IDENTITÀ · VERSIONE PUBBLICA" : "CARTA IDENTITÀ · VERSIONE COMPLETA", 48, 98);
   ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 42px Arial";
+  ctx.font = "bold 42px sans-serif";
   ctx.fillText(nome.toUpperCase(), 48, 170);
   if (!isPublic && cognome) {
     ctx.fillStyle = "#D4AF37";
-    ctx.font = "bold 34px Arial";
+    ctx.font = "bold 34px sans-serif";
     ctx.fillText(cognome.toUpperCase(), 48, 220);
   }
   const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
   ctx.fillStyle = "rgba(255,255,255,0.75)";
-  ctx.font = "16px Arial";
+  ctx.font = "16px sans-serif";
   ctx.fillText(`Membro dal ${dataCreazione}`, 48, isPublic ? 230 : 280);
   ctx.fillStyle = "#D4AF37";
-  ctx.font = "16px Arial";
+  ctx.font = "16px sans-serif";
   ctx.fillText(`@${user.username}`, 48, isPublic ? 265 : 315);
   if (!isPublic && pin) {
     roundRect(ctx, 48, 350, 220, 56, 12);
@@ -206,11 +206,11 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 24px Arial";
+    ctx.font = "bold 24px sans-serif";
     ctx.fillText(`PIN · ${pin}`, 64, 385);
   } else if (isPublic) {
     ctx.fillStyle = "rgba(255,255,255,0.45)";
-    ctx.font = "14px Arial";
+    ctx.font = "14px sans-serif";
     ctx.fillText("Dati sensibili nascosti", 48, 310);
   }
   const avatarUrl = user.displayAvatarURL({ extension: "png", size: 256 });
@@ -229,15 +229,15 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   ctx.drawImage(avatarImage, avatarX - avatarRadius, avatarY - avatarRadius, avatarRadius * 2, avatarRadius * 2);
   ctx.restore();
   ctx.fillStyle = "rgba(212, 175, 55, 0.9)";
-  ctx.font = "bold 16px Arial";
+  ctx.font = "bold 16px sans-serif";
   ctx.fillText("Chicago City Rp Card", 48, 490);
   if (isPublic) {
     ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.font = "12px Arial";
+    ctx.font = "12px sans-serif";
     ctx.fillText("Solo il proprietario può richiedere la versione completa", 48, 512);
   } else {
     ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.font = "12px Arial";
+    ctx.font = "12px sans-serif";
     ctx.fillText("Documento riservato — non condividere", 48, 512);
   }
   return canvas.toBuffer("image/png");
