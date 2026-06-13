@@ -184,116 +184,209 @@ function drawCardText(ctx, text, x, y, { color = "#ffffff", stroke = "rgba(0,0,0
   ctx.fillStyle = color;
   ctx.fillText(text, x, y);
 }
+function fitText(ctx, text, maxWidth) {
+  let value = String(text ?? "").trim();
+  if (!value) return "—";
+  if (ctx.measureText(value).width <= maxWidth) return value;
+  while (value.length > 1 && ctx.measureText(`${value}…`).width > maxWidth) {
+    value = value.slice(0, -1);
+  }
+  return `${value}…`;
+}
+function drawSoftLine(ctx, x1, y1, x2, y2, color = "rgba(255,255,255,0.18)") {
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
 async function generateCardImage(user, nome, cognome, createdAt, { isPublic = true, pin = null } = {}) {
   ensureCardFonts();
   const canvas = createCanvas(860, 540);
   const ctx = canvas.getContext("2d");
   if ("textDrawingMode" in ctx) ctx.textDrawingMode = "glyph";
   const bg = ctx.createLinearGradient(0, 0, 860, 540);
-  bg.addColorStop(0, "#0f0c29");
-  bg.addColorStop(0.5, "#302b63");
-  bg.addColorStop(1, "#24243e");
+  bg.addColorStop(0, "#101832");
+  bg.addColorStop(0.42, "#261348");
+  bg.addColorStop(1, "#07131d");
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, 860, 540);
-  ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
-  for (let i = 0; i < 6; i++) {
+
+  const glowA = ctx.createRadialGradient(690, 110, 20, 690, 110, 310);
+  glowA.addColorStop(0, "rgba(255, 214, 112, 0.34)");
+  glowA.addColorStop(1, "rgba(255, 214, 112, 0)");
+  ctx.fillStyle = glowA;
+  ctx.fillRect(0, 0, 860, 540);
+  const glowB = ctx.createRadialGradient(170, 430, 20, 170, 430, 290);
+  glowB.addColorStop(0, "rgba(106, 225, 255, 0.22)");
+  glowB.addColorStop(1, "rgba(106, 225, 255, 0)");
+  ctx.fillStyle = glowB;
+  ctx.fillRect(0, 0, 860, 540);
+
+  ctx.save();
+  ctx.globalAlpha = 0.12;
+  for (let i = 0; i < 12; i++) {
     ctx.beginPath();
-    ctx.arc(120 + i * 130, 80 + (i % 2) * 40, 90, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  roundRect(ctx, 24, 24, 812, 492, 28);
-  ctx.fillStyle = "rgba(10, 10, 20, 0.55)";
-  ctx.fill();
-  ctx.strokeStyle = "#D4AF37";
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-  roundRect(ctx, 40, 46, 470, isPublic ? 300 : 350, 22);
-  ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
-  ctx.fill();
-  const accent = ctx.createLinearGradient(40, 40, 400, 120);
-  accent.addColorStop(0, "#f5d76e");
-  accent.addColorStop(1, "#D4AF37");
-  ctx.fillStyle = accent;
-  setCardFont(ctx, 22, { bold: true });
-  drawCardText(ctx, "CHICAGO CITY RP", 48, 72, { color: accent, stroke: "rgba(0,0,0,0.7)", lineWidth: 4 });
-  setCardFont(ctx, 14);
-  drawCardText(ctx, isPublic ? "CARTA IDENTITÀ · VERSIONE PUBBLICA" : "CARTA IDENTITÀ · VERSIONE COMPLETA", 48, 98, {
-    color: "rgba(255, 231, 166, 0.95)",
-    stroke: "rgba(0,0,0,0.7)",
-    lineWidth: 3,
-  });
-  setCardFont(ctx, 42, { bold: true });
-  drawCardText(ctx, nome.toUpperCase(), 48, 170, { color: "#ffffff", stroke: "rgba(0,0,0,0.78)", lineWidth: 5 });
-  if (!isPublic && cognome) {
-    setCardFont(ctx, 34, { bold: true });
-    drawCardText(ctx, cognome.toUpperCase(), 48, 220, { color: "#f5d76e", stroke: "rgba(0,0,0,0.78)", lineWidth: 4 });
-  }
-  const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
-  setCardFont(ctx, 16, { bold: true });
-  drawCardText(ctx, `Membro dal ${dataCreazione}`, 48, isPublic ? 230 : 280, {
-    color: "rgba(255,255,255,0.92)",
-    stroke: "rgba(0,0,0,0.72)",
-    lineWidth: 3,
-  });
-  setCardFont(ctx, 16, { bold: true });
-  drawCardText(ctx, `@${user.username}`, 48, isPublic ? 265 : 315, {
-    color: "#f5d76e",
-    stroke: "rgba(0,0,0,0.72)",
-    lineWidth: 3,
-  });
-  if (!isPublic && pin) {
-    roundRect(ctx, 48, 350, 220, 56, 12);
-    ctx.fillStyle = "rgba(212, 175, 55, 0.15)";
-    ctx.fill();
-    ctx.strokeStyle = "#D4AF37";
-    ctx.lineWidth = 1.5;
+    ctx.arc(72 + i * 78, 52 + (i % 3) * 164, 58 + (i % 2) * 26, 0, Math.PI * 2);
+    ctx.strokeStyle = i % 2 ? "#f7d26a" : "#78e7ff";
+    ctx.lineWidth = 2;
     ctx.stroke();
-    setCardFont(ctx, 24, { bold: true });
-    drawCardText(ctx, `PIN · ${pin}`, 64, 385, { color: "#ffffff", stroke: "rgba(0,0,0,0.72)", lineWidth: 4 });
-  } else if (isPublic) {
-    setCardFont(ctx, 14, { bold: true });
-    drawCardText(ctx, "Dati sensibili nascosti", 48, 310, {
-      color: "rgba(255,255,255,0.82)",
-      stroke: "rgba(0,0,0,0.72)",
-      lineWidth: 3,
-    });
   }
+  ctx.restore();
+
+  roundRect(ctx, 24, 24, 812, 492, 34);
+  const glass = ctx.createLinearGradient(24, 24, 836, 516);
+  glass.addColorStop(0, "rgba(255,255,255,0.18)");
+  glass.addColorStop(0.52, "rgba(255,255,255,0.06)");
+  glass.addColorStop(1, "rgba(0,0,0,0.30)");
+  ctx.fillStyle = glass;
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 219, 126, 0.95)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  roundRect(ctx, 46, 54, 492, 366, 28);
+  ctx.fillStyle = "rgba(3, 9, 20, 0.46)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.14)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  const accent = ctx.createLinearGradient(52, 48, 450, 92);
+  accent.addColorStop(0, "#fff1a8");
+  accent.addColorStop(0.5, "#f4c15d");
+  accent.addColorStop(1, "#7ff3ff");
+  setCardFont(ctx, 24, { bold: true });
+  drawCardText(ctx, "CHICAGO CITY RP", 58, 82, { color: accent, stroke: "rgba(0,0,0,0.54)", lineWidth: 4 });
+  setCardFont(ctx, 14);
+  drawCardText(ctx, isPublic ? "CARTA IDENTITÀ · PUBBLICA" : "CARTA IDENTITÀ · COMPLETA", 58, 112, {
+    color: "rgba(255, 238, 185, 0.95)",
+    stroke: "rgba(0,0,0,0.62)",
+    lineWidth: 3,
+  });
+
+  roundRect(ctx, 620, 66, 154, 42, 16);
+  ctx.fillStyle = isPublic ? "rgba(126, 243, 255, 0.16)" : "rgba(255, 199, 89, 0.17)";
+  ctx.fill();
+  ctx.strokeStyle = isPublic ? "rgba(126,243,255,0.65)" : "rgba(255,199,89,0.66)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  setCardFont(ctx, 13, { bold: true });
+  drawCardText(ctx, isPublic ? "PUBLIC VIEW" : "OWNER ONLY", 642, 93, {
+    color: isPublic ? "#aef8ff" : "#ffe3a0",
+    stroke: "rgba(0,0,0,0.55)",
+    lineWidth: 2,
+  });
+
   const avatarUrl = user.displayAvatarURL({ extension: "png", size: 256 });
   const avatarImage = await loadImage(avatarUrl);
-  const avatarX = 680;
-  const avatarY = 270;
-  const avatarRadius = 88;
+  const avatarX = 682;
+  const avatarY = 286;
+  const avatarRadius = 92;
   ctx.save();
   ctx.beginPath();
-  ctx.arc(avatarX, avatarY, avatarRadius + 6, 0, Math.PI * 2);
-  ctx.fillStyle = "#D4AF37";
+  ctx.arc(avatarX, avatarY, avatarRadius + 11, 0, Math.PI * 2);
+  const avatarRing = ctx.createLinearGradient(avatarX - 110, avatarY - 110, avatarX + 110, avatarY + 110);
+  avatarRing.addColorStop(0, "#fff2aa");
+  avatarRing.addColorStop(0.45, "#d4af37");
+  avatarRing.addColorStop(1, "#7ff3ff");
+  ctx.fillStyle = avatarRing;
   ctx.fill();
   ctx.beginPath();
   ctx.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2);
   ctx.clip();
   ctx.drawImage(avatarImage, avatarX - avatarRadius, avatarY - avatarRadius, avatarRadius * 2, avatarRadius * 2);
   ctx.restore();
-  setCardFont(ctx, 16, { bold: true });
-  drawCardText(ctx, "Chicago City Rp Card", 48, 490, {
-    color: "rgba(245, 215, 110, 0.95)",
-    stroke: "rgba(0,0,0,0.72)",
-    lineWidth: 3,
-  });
-  if (isPublic) {
-    setCardFont(ctx, 12, { bold: true });
-    drawCardText(ctx, "Solo il proprietario può richiedere la versione completa", 48, 512, {
-      color: "rgba(255,255,255,0.72)",
-      stroke: "rgba(0,0,0,0.7)",
-      lineWidth: 2,
-    });
+
+  ctx.save();
+  ctx.globalAlpha = 0.28;
+  ctx.beginPath();
+  ctx.ellipse(682, 286, 132, 48, -0.46, 0, Math.PI * 2);
+  ctx.strokeStyle = "#7ff3ff";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+
+  const safeNome = String(nome ?? "").toUpperCase();
+  const safeCognome = String(cognome ?? "").toUpperCase();
+  setCardFont(ctx, 46, { bold: true });
+  drawCardText(ctx, fitText(ctx, safeNome, 430), 58, 186, { color: "#ffffff", stroke: "rgba(0,0,0,0.72)", lineWidth: 5 });
+  if (!isPublic && safeCognome) {
+    setCardFont(ctx, 34, { bold: true });
+    drawCardText(ctx, fitText(ctx, safeCognome, 420), 58, 236, { color: "#ffe08b", stroke: "rgba(0,0,0,0.70)", lineWidth: 4 });
   } else {
-    setCardFont(ctx, 12, { bold: true });
-    drawCardText(ctx, "Documento riservato — non condividere", 48, 512, {
-      color: "rgba(255,255,255,0.72)",
-      stroke: "rgba(0,0,0,0.7)",
+    roundRect(ctx, 58, 211, 282, 36, 14);
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fill();
+    setCardFont(ctx, 14, { bold: true });
+    drawCardText(ctx, "COGNOME NASCOSTO", 76, 235, {
+      color: "rgba(255,255,255,0.82)",
+      stroke: "rgba(0,0,0,0.55)",
       lineWidth: 2,
     });
   }
+  const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
+  setCardFont(ctx, 15, { bold: true });
+  drawCardText(ctx, `MEMBRO DAL ${dataCreazione.toUpperCase()}`, 58, 292, {
+    color: "rgba(255,255,255,0.92)",
+    stroke: "rgba(0,0,0,0.66)",
+    lineWidth: 3,
+  });
+  setCardFont(ctx, 17, { bold: true });
+  drawCardText(ctx, fitText(ctx, `@${user.username}`, 330), 58, 326, {
+    color: "#7ff3ff",
+    stroke: "rgba(0,0,0,0.66)",
+    lineWidth: 3,
+  });
+
+  drawSoftLine(ctx, 58, 354, 492, 354, "rgba(255,255,255,0.20)");
+  if (!isPublic && pin) {
+    roundRect(ctx, 58, 374, 250, 58, 16);
+    ctx.fillStyle = "rgba(255, 210, 106, 0.16)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 219, 126, 0.82)";
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    setCardFont(ctx, 23, { bold: true });
+    drawCardText(ctx, `PIN · ${pin}`, 78, 411, { color: "#ffffff", stroke: "rgba(0,0,0,0.68)", lineWidth: 4 });
+  } else if (isPublic) {
+    roundRect(ctx, 58, 374, 298, 58, 16);
+    ctx.fillStyle = "rgba(126, 243, 255, 0.12)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(126, 243, 255, 0.45)";
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    setCardFont(ctx, 15, { bold: true });
+    drawCardText(ctx, "PIN E DATI SENSIBILI NASCOSTI", 76, 410, {
+      color: "rgba(226,251,255,0.92)",
+      stroke: "rgba(0,0,0,0.60)",
+      lineWidth: 2.5,
+    });
+  }
+
+  roundRect(ctx, 584, 404, 194, 48, 14);
+  ctx.fillStyle = "rgba(255,255,255,0.08)";
+  ctx.fill();
+  setCardFont(ctx, 13, { bold: true });
+  drawCardText(ctx, isPublic ? "SAFE PUBLIC CARD" : "PRIVATE OWNER CARD", 606, 434, {
+    color: "rgba(255,255,255,0.82)",
+    stroke: "rgba(0,0,0,0.55)",
+    lineWidth: 2,
+  });
+
+  setCardFont(ctx, 16, { bold: true });
+  drawCardText(ctx, "Chicago City Rp Card", 58, 486, {
+    color: "rgba(255, 225, 142, 0.96)",
+    stroke: "rgba(0,0,0,0.66)",
+    lineWidth: 3,
+  });
+  setCardFont(ctx, 12, { bold: true });
+  drawCardText(ctx, isPublic ? "Premi “Vedi tutto” solo se questa carta è tua" : "Documento riservato — non condividere", 58, 510, {
+    color: "rgba(255,255,255,0.72)",
+    stroke: "rgba(0,0,0,0.64)",
+    lineWidth: 2,
+  });
   return canvas.toBuffer("image/png");
 }
 async function pagareStipendiGuild(client) {
@@ -401,8 +494,8 @@ const commands = [
     .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
   new SlashCommandBuilder()
     .setName("mostracarta")
-    .setDescription("Mostra la tua carta nel canale (versione pubblica)")
-    .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN per confermare").setRequired(true).setMinValue(1000).setMaxValue(9999)),
+    .setDescription("Mostra nel canale una carta pubblica, senza cognome e senza PIN")
+    .addUserOption(o => o.setName("utente").setDescription("Carta da mostrare pubblicamente").setRequired(false)),
   new SlashCommandBuilder()
     .setName("setstipendio")
     .setDescription("[SOLO STAFF] Imposta o modifica lo stipendio mensile di un ruolo")
@@ -420,14 +513,14 @@ function buildPublicCardReply(user, imgBuffer) {
   const attachment = new AttachmentBuilder(imgBuffer, { name: "carta_pubblica.png" });
   const fullCardButton = new ButtonBuilder()
     .setCustomId(`carta_completa_${user.id}`)
-    .setLabel("🔐 Vedi carta completa")
-    .setStyle(ButtonStyle.Secondary);
+    .setLabel("👁️ Vedi tutto")
+    .setStyle(ButtonStyle.Primary);
   const row = new ActionRowBuilder().addComponents(fullCardButton);
   return {
     content: "",
     embeds: [new EmbedBuilder().setColor(0xD4AF37)
       .setTitle("💳 Chicago City Rp Card")
-      .setDescription(`${user} ha mostrato la propria carta identità.\n*Versione pubblica — cognome e PIN nascosti.*`)
+      .setDescription(`Carta identità pubblica di ${user}.\n*Versione pubblica — cognome e PIN nascosti.*`)
       .setImage("attachment://carta_pubblica.png")
       .setFooter({ text: "Solo il proprietario può richiedere la carta completa via DM" })
       .setTimestamp()],
@@ -671,18 +764,19 @@ async function handleCommand(interaction) {
     }
   }
   if (commandName === "mostracarta") {
-    const pin = interaction.options.getInteger("pin", true);
-    const acc = await getAccount(user.id, guildId);
-    const card = await getCard(user.id, guildId);
-    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-    if (!card) return interaction.editReply({ embeds: [err("Non hai ancora una carta. Usa **/creacarta** prima.")] });
-    if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
-    if (hashPin(pin) !== acc.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
-    await query("UPDATE cards SET pin_enc=$1 WHERE user_id=$2 AND guild_id=$3", [encryptPin(pin), user.id, guildId]);
+    const target = interaction.options.getUser("utente") ?? user;
+    if (target.bot) return interaction.editReply({ embeds: [err("I bot non hanno una carta identità.")] });
+    const card = await getCard(target.id, guildId);
+    if (!card) {
+      const message = target.id === user.id
+        ? "Non hai ancora una carta. Usa **/creacarta** prima."
+        : `${target} non ha ancora una carta.`;
+      return interaction.editReply({ embeds: [err(message)] });
+    }
     await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
     try {
-      const imgBuffer = await generateCardImage(user, card.nome, card.cognome, card.created_at, { isPublic: true });
-      return interaction.editReply(buildPublicCardReply(user, imgBuffer));
+      const imgBuffer = await generateCardImage(target, card.nome, card.cognome, card.created_at, { isPublic: true });
+      return interaction.editReply(buildPublicCardReply(target, imgBuffer));
     } catch (error) {
       console.error("Errore nella generazione della carta:", error);
       return interaction.editReply({ embeds: [err("Errore nella generazione della carta. Riprova più tardi.")] });
@@ -725,10 +819,15 @@ async function handleFullCardButton(interaction) {
   if (!card) {
     return interaction.editReply({ embeds: [err("Carta non trovata. Usa **/creacarta** per crearne una.")] });
   }
-  const pin = decryptPin(card.pin_enc);
+  let pin = null;
+  try {
+    pin = decryptPin(card.pin_enc);
+  } catch {
+    pin = null;
+  }
   if (!pin) {
     return interaction.editReply({
-      embeds: [err("PIN non disponibile. Usa **/mostracarta** o **/creacarta** inserendo il PIN per aggiornare la carta.")],
+      embeds: [err("PIN non disponibile. Usa **/creacarta** inserendo il PIN corretto per aggiornare la carta.")],
     });
   }
   try {
