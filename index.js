@@ -153,17 +153,20 @@ function calcolaStipendio(member, salaries) {
 // Funzione per generare l'immagine della carta
 async function generateCardImage(user, member, nome, cognome, createdAt) {
   try {
-    const bgPath = path.join(__dirname, "chicago-bg.png");
-
     const canvas = createCanvas(800, 500);
     const ctx = canvas.getContext("2d");
 
-    // Carica e disegna il background
-    const bgImage = await loadImage(bgPath);
-    ctx.drawImage(bgImage, 0, 0, 800, 500);
+    // Sfondo con gradiente "tramonto di Chicago" (disegnato, nessun file esterno)
+    const gradient = ctx.createLinearGradient(0, 0, 0, 500);
+    gradient.addColorStop(0, "#1a1a2e");   // cielo notturno in alto
+    gradient.addColorStop(0.45, "#7b3f1d"); // arancione scuro
+    gradient.addColorStop(0.7, "#c2671f");  // arancione tramonto
+    gradient.addColorStop(1, "#0d0d14");    // acqua scura in basso
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 800, 500);
 
-    // Overlay scuro
-    ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+    // Overlay scuro per leggibilità del testo
+    ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
     ctx.fillRect(0, 0, 800, 500);
 
     // Disegna il bordo della carta (oro)
