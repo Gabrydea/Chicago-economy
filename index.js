@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
 const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
@@ -23,6 +23,29 @@ const DEFAULT_ROLE_SALARIES = {
   "1504115728859529371": 150,
   "1504115619291730041": 100,
 };
+const SHOP_CATALOG = [
+  { name: "Telefonia", value: "telefonia" },
+  { name: "Elettronica", value: "elettronica" },
+  { name: "Supermercato", value: "supermercato" },
+  { name: "Farmacia", value: "farmacia" },
+  { name: "Abbigliamento", value: "abbigliamento" },
+  { name: "Gioielleria", value: "gioielleria" },
+  { name: "Concessionaria", value: "concessionaria" },
+  { name: "Garage e Ricambi", value: "garage" },
+  { name: "Benzinaio", value: "benzinaio" },
+  { name: "Immobiliare", value: "immobiliare" },
+  { name: "Arredamento", value: "arredamento" },
+  { name: "Ferramenta", value: "ferramenta" },
+  { name: "Ristorante", value: "ristorante" },
+  { name: "Fast Food", value: "fast_food" },
+  { name: "Pizzeria", value: "pizzeria" },
+  { name: "Bar", value: "bar" },
+  { name: "Gelateria", value: "gelateria" },
+  { name: "Panetteria", value: "panetteria" },
+  { name: "Animali", value: "animali" },
+  { name: "Ospedale", value: "ospedale" },
+  { name: "Parrucchiere", value: "parrucchiere" },
+];
 const CARD_FONT_FAMILY = "ChicagoCardSans";
 const salaryCache = new Map();
 if (!token) { console.error("DISCORD_BOT_TOKEN mancante"); process.exit(1); }
@@ -35,6 +58,18 @@ async function query(sql, params = []) {
 }
 function hashPin(pin) {
   return crypto.createHash("sha256").update(String(pin)).digest("hex");
+}
+function getShopName(shopKey) {
+  return SHOP_CATALOG.find(shop => shop.value === shopKey)?.name || shopKey;
+}
+function isImageAttachment(attachment) {
+  if (!attachment) return false;
+  if (attachment.contentType?.startsWith("image/")) return true;
+  return /\.(png|jpe?g|gif|webp)$/i.test(attachment.url || "");
+}
+function shorten(text, max = 90) {
+  const value = String(text ?? "").trim();
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 function getPinEncryptionKey() {
   const secret = process.env.PIN_ENCRYPTION_SECRET || token;
@@ -95,6 +130,18 @@ async function setupDb() {
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(guild_id, role_id)
   )`);
+  await query(`CREATE TABLE IF NOT EXISTS products (
+    id SERIAL PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    creator_user_id TEXT NOT NULL,
+    shop_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    price BIGINT NOT NULL,
+    image_url TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_products_guild_shop ON products(guild_id, shop_key)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_products_creator ON products(guild_id, creator_user_id)`);
   await query(`ALTER TABLE cards ADD COLUMN IF NOT EXISTS pin_enc TEXT`).catch(() => {});
   console.log("Database pronto.");
 }
@@ -128,6 +175,56 @@ async function getAccount(userId, guildId) {
 async function getCard(userId, guildId) {
   const { rows } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [userId, guildId]);
   return rows[0] || null;
+}
+async function getProduct(productId, guildId) {
+  const { rows } = await query("SELECT * FROM products WHERE id=$1 AND guild_id=$2", [productId, guildId]);
+  return rows[0] || null;
+}
+async function getShopProductCounts(guildId) {
+  const { rows } = await query(
+    "SELECT shop_key, COUNT(*)::int AS count FROM products WHERE guild_id=$1 GROUP BY shop_key ORDER BY shop_key",
+    [guildId]
+  );
+  return rows;
+}
+async function listProductsForShop(guildId, shopKey) {
+  const { rows } = await query(
+    "SELECT * FROM products WHERE guild_id=$1 AND shop_key=$2 ORDER BY created_at DESC, id DESC LIMIT 25",
+    [guildId, shopKey]
+  );
+  return rows;
+}
+async function completeOnlinePurchase({ buyerId, sellerId, guildId, amount, productName, productId }) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const buyerResult = await client.query(
+      "SELECT * FROM bank_accounts WHERE user_id=$1 AND guild_id=$2 FOR UPDATE",
+      [buyerId, guildId]
+    );
+    const sellerResult = await client.query(
+      "SELECT * FROM bank_accounts WHERE user_id=$1 AND guild_id=$2 FOR UPDATE",
+      [sellerId, guildId]
+    );
+    const buyer = buyerResult.rows[0];
+    const seller = sellerResult.rows[0];
+    if (!buyer) throw new Error("BUYER_ACCOUNT_MISSING");
+    if (!seller) throw new Error("SELLER_ACCOUNT_MISSING");
+    if (Number(buyer.balance) < amount) throw new Error("INSUFFICIENT_FUNDS");
+    await client.query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [amount, buyerId, guildId]);
+    await client.query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [amount, sellerId, guildId]);
+    await client.query(
+      "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'acquisto_online')",
+      [buyerId, sellerId, guildId, amount, `Acquisto online #${productId}: ${productName}`]
+    );
+    await client.query("COMMIT");
+    return { buyerBalance: Number(buyer.balance) - amount, sellerBalance: Number(seller.balance) + amount };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 function euros(n) { return `**${Number(n).toLocaleString("it-IT")} €**`; }
 function err(msg) { return new EmbedBuilder().setColor(0xe74c3c).setTitle("❌ Errore").setDescription(msg); }
@@ -497,6 +594,21 @@ const commands = [
     .setDescription("Mostra nel canale una carta pubblica, senza cognome e senza PIN")
     .addUserOption(o => o.setName("utente").setDescription("Carta da mostrare pubblicamente").setRequired(false)),
   new SlashCommandBuilder()
+    .setName("creaprodotto")
+    .setDescription("Crea un prodotto vendibile in un negozio online")
+    .addStringOption(o => o.setName("negozio").setDescription("Negozio in cui mettere il prodotto").setRequired(true).addChoices(...SHOP_CATALOG))
+    .addStringOption(o => o.setName("nome").setDescription("Nome del prodotto").setRequired(true).setMaxLength(80))
+    .addIntegerOption(o => o.setName("costo").setDescription("Prezzo del prodotto in euro").setRequired(true).setMinValue(1))
+    .addAttachmentOption(o => o.setName("immagine").setDescription("Foto del prodotto").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("eliminaprodotto")
+    .setDescription("Elimina un prodotto che hai creato")
+    .addIntegerOption(o => o.setName("id").setDescription("ID del prodotto da eliminare").setRequired(true).setMinValue(1)),
+  new SlashCommandBuilder()
+    .setName("compraonline")
+    .setDescription("Pubblica il pannello con il bottone Ordina online")
+    .addAttachmentOption(o => o.setName("immagine").setDescription("Immagine/banner del negozio online").setRequired(false)),
+  new SlashCommandBuilder()
     .setName("setstipendio")
     .setDescription("[SOLO STAFF] Imposta o modifica lo stipendio mensile di un ruolo")
     .addRoleOption(o => o.setName("ruolo").setDescription("Il ruolo a cui assegnare lo stipendio").setRequired(true))
@@ -530,7 +642,7 @@ function buildPublicCardReply(user, imgBuffer) {
 }
 async function handleCommand(interaction) {
   const { commandName, user, guildId, member } = interaction;
-  const ephemeral = ["saldo", "paga", "stipendio", "setstipendio", "rimuovistipendio", "listastipendi"].includes(commandName);
+  const ephemeral = ["saldo", "paga", "stipendio", "creaprodotto", "eliminaprodotto", "setstipendio", "rimuovistipendio", "listastipendi"].includes(commandName);
   await interaction.deferReply({ ephemeral });
   if (commandName === "apriconto") {
     const existing = await getAccount(user.id, guildId);
@@ -782,6 +894,60 @@ async function handleCommand(interaction) {
       return interaction.editReply({ embeds: [err("Errore nella generazione della carta. Riprova più tardi.")] });
     }
   }
+  if (commandName === "creaprodotto") {
+    const shopKey = interaction.options.getString("negozio", true);
+    const nome = interaction.options.getString("nome", true).trim();
+    const costo = interaction.options.getInteger("costo", true);
+    const immagine = interaction.options.getAttachment("immagine", true);
+    const acc = await getAccount(user.id, guildId);
+    if (!acc) return interaction.editReply({ embeds: [err("Devi avere un conto bancario per vendere prodotti. Usa prima **/apriconto**.")] });
+    if (!isImageAttachment(immagine)) return interaction.editReply({ embeds: [err("L'allegato deve essere una foto/immagine del prodotto.")] });
+    const { rows } = await query(
+      "INSERT INTO products(guild_id, creator_user_id, shop_key, name, price, image_url) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
+      [guildId, user.id, shopKey, nome, costo, immagine.url]
+    );
+    const product = rows[0];
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle("🛍️ Prodotto Creato")
+      .setDescription(`Il prodotto è ora disponibile nel negozio **${getShopName(shopKey)}**.`)
+      .addFields(
+        { name: "ID prodotto", value: `#${product.id}`, inline: true },
+        { name: "Nome", value: product.name, inline: true },
+        { name: "Prezzo", value: euros(product.price), inline: true }
+      )
+      .setImage(product.image_url)
+      .setFooter({ text: "Solo chi ha creato il prodotto può eliminarlo." })
+      .setTimestamp()] });
+  }
+  if (commandName === "eliminaprodotto") {
+    const productId = interaction.options.getInteger("id", true);
+    const product = await getProduct(productId, guildId);
+    if (!product) return interaction.editReply({ embeds: [err("Prodotto non trovato in questo server.")] });
+    if (product.creator_user_id !== user.id) {
+      return interaction.editReply({ embeds: [err("Può eliminare questo prodotto solo chi lo ha creato.")] });
+    }
+    await query("DELETE FROM products WHERE id=$1 AND guild_id=$2", [productId, guildId]);
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe67e22)
+      .setTitle("🗑️ Prodotto Eliminato")
+      .setDescription(`Hai eliminato **${product.name}** da **${getShopName(product.shop_key)}**.`)
+      .setTimestamp()] });
+  }
+  if (commandName === "compraonline") {
+    const immagine = interaction.options.getAttachment("immagine");
+    if (immagine && !isImageAttachment(immagine)) return interaction.editReply({ embeds: [err("L'allegato deve essere un'immagine/banner.")] });
+    const orderButton = new ButtonBuilder()
+      .setCustomId("online_shop_open")
+      .setLabel("🛒 Ordina online")
+      .setStyle(ButtonStyle.Success);
+    const embed = new EmbedBuilder()
+      .setColor(0x2ecc71)
+      .setTitle("📦 Acquisti Online Brookhaven")
+      .setDescription("Premi **Ordina online**, scegli il negozio, seleziona il prodotto e conferma il pagamento con il tuo PIN.")
+      .setFooter({ text: "Il pagamento arriva subito al venditore nel conto del server." })
+      .setTimestamp();
+    if (immagine) embed.setImage(immagine.url);
+    return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(orderButton)] });
+  }
   if (commandName === "saldo") {
     const acc = await getAccount(user.id, guildId);
     if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno.")] });
@@ -852,6 +1018,166 @@ async function handleFullCardButton(interaction) {
     });
   }
 }
+async function handleOnlineShopOpen(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+  const counts = await getShopProductCounts(interaction.guildId);
+  const countMap = new Map(counts.map(row => [row.shop_key, row.count]));
+  const options = SHOP_CATALOG
+    .filter(shop => countMap.has(shop.value))
+    .map(shop => ({
+      label: shop.name,
+      value: shop.value,
+      description: `${countMap.get(shop.value)} prodotti disponibili`,
+    }));
+  if (!options.length) {
+    return interaction.editReply({ embeds: [err("Non ci sono ancora prodotti online. Usa **/creaprodotto** per aggiungerne uno.")] });
+  }
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("online_shop_select")
+    .setPlaceholder("Scegli il negozio in cui acquistare")
+    .addOptions(options.slice(0, 25));
+  return interaction.editReply({
+    embeds: [new EmbedBuilder().setColor(0x3498db)
+      .setTitle("🛒 Scegli un negozio")
+      .setDescription("Seleziona il negozio, poi scegli il prodotto da ordinare online.")],
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+async function handleOnlineShopSelect(interaction) {
+  const shopKey = interaction.values[0];
+  const products = await listProductsForShop(interaction.guildId, shopKey);
+  if (!products.length) {
+    return interaction.update({ embeds: [err("Questo negozio non ha più prodotti disponibili.")], components: [] });
+  }
+  const productOptions = products.map(product => ({
+    label: shorten(product.name, 90),
+    value: String(product.id),
+    description: shorten(`${Number(product.price).toLocaleString("it-IT")} € · ID #${product.id}`, 100),
+  }));
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("online_product_select")
+    .setPlaceholder("Scegli il prodotto da ordinare")
+    .addOptions(productOptions);
+  const preview = products.slice(0, 10).map(product => `#${product.id} · **${product.name}** — ${euros(product.price)}`).join("\n");
+  const extra = products.length > 10 ? `\n…e altri ${products.length - 10} prodotti nel menu.` : "";
+  return interaction.update({
+    content: "",
+    embeds: [new EmbedBuilder().setColor(0x3498db)
+      .setTitle(`🏪 ${getShopName(shopKey)}`)
+      .setDescription(`${preview}${extra}`)
+      .setFooter({ text: "Scegli un prodotto per vedere la foto e pagare con PIN." })],
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+async function handleOnlineProductSelect(interaction) {
+  const productId = Number(interaction.values[0]);
+  const product = await getProduct(productId, interaction.guildId);
+  if (!product) {
+    return interaction.update({ embeds: [err("Prodotto non più disponibile.")], components: [] });
+  }
+  const buyButton = new ButtonBuilder()
+    .setCustomId(`online_buy_${product.id}`)
+    .setLabel("🔐 Inserisci PIN e paga")
+    .setStyle(ButtonStyle.Success);
+  return interaction.update({
+    content: "",
+    embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle(`📦 ${product.name}`)
+      .setDescription("Conferma l'ordine inserendo il PIN del tuo conto bancario.")
+      .addFields(
+        { name: "Negozio", value: getShopName(product.shop_key), inline: true },
+        { name: "Prezzo", value: euros(product.price), inline: true },
+        { name: "Venditore", value: `<@${product.creator_user_id}>`, inline: true }
+      )
+      .setImage(product.image_url)
+      .setFooter({ text: "Il pacco viene confermato solo dopo il pagamento." })
+      .setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(buyButton)],
+  });
+}
+async function handleOnlineBuyButton(interaction) {
+  const productId = Number(interaction.customId.replace("online_buy_", ""));
+  const product = await getProduct(productId, interaction.guildId);
+  if (!product) return interaction.reply({ content: "❌ Prodotto non più disponibile.", ephemeral: true });
+  if (product.creator_user_id === interaction.user.id) {
+    return interaction.reply({ content: "❌ Non puoi comprare un prodotto creato da te.", ephemeral: true });
+  }
+  const acc = await getAccount(interaction.user.id, interaction.guildId);
+  if (!acc) return interaction.reply({ content: "❌ Non hai un conto bancario. Usa prima **/apriconto**.", ephemeral: true });
+  if (!acc.pin_hash) return interaction.reply({ content: "❌ Non hai ancora un PIN. Usa **/creapin** prima di comprare online.", ephemeral: true });
+
+  const modal = new ModalBuilder()
+    .setCustomId(`online_pin_${product.id}`)
+    .setTitle("Pagamento online");
+  const pinInput = new TextInputBuilder()
+    .setCustomId("pin")
+    .setLabel("Inserisci il PIN del conto")
+    .setPlaceholder("1234")
+    .setMinLength(4)
+    .setMaxLength(4)
+    .setRequired(true)
+    .setStyle(TextInputStyle.Short);
+  modal.addComponents(new ActionRowBuilder().addComponents(pinInput));
+  return interaction.showModal(modal);
+}
+async function handleOnlinePinModal(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+  const productId = Number(interaction.customId.replace("online_pin_", ""));
+  const pin = interaction.fields.getTextInputValue("pin").trim();
+  if (!/^\d{4}$/.test(pin)) {
+    return interaction.editReply({ embeds: [err("Il PIN deve essere composto da 4 cifre.")] });
+  }
+  const product = await getProduct(productId, interaction.guildId);
+  if (!product) return interaction.editReply({ embeds: [err("Prodotto non più disponibile.")] });
+  if (product.creator_user_id === interaction.user.id) {
+    return interaction.editReply({ embeds: [err("Non puoi comprare un prodotto creato da te.")] });
+  }
+  const buyer = await getAccount(interaction.user.id, interaction.guildId);
+  if (!buyer) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
+  if (!buyer.pin_hash) return interaction.editReply({ embeds: [err("Non hai ancora un PIN. Usa **/creapin** prima di comprare online.")] });
+  if (hashPin(pin) !== buyer.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Pagamento annullato.")] });
+
+  const price = Number(product.price);
+  try {
+    const result = await completeOnlinePurchase({
+      buyerId: interaction.user.id,
+      sellerId: product.creator_user_id,
+      guildId: interaction.guildId,
+      amount: price,
+      productName: product.name,
+      productId: product.id,
+    });
+    const sellerUser = await interaction.client.users.fetch(product.creator_user_id).catch(() => null);
+    if (sellerUser) {
+      await sellerUser.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+        .setTitle("💸 Vendita Online Ricevuta")
+        .setDescription(`${interaction.user.tag} ha comprato **${product.name}** da **${getShopName(product.shop_key)}**.`)
+        .addFields(
+          { name: "Importo ricevuto", value: euros(price), inline: true },
+          { name: "Saldo nel server", value: euros(result.sellerBalance), inline: true }
+        )
+        .setFooter({ text: "I soldi sono stati accreditati nel tuo conto del server." })
+        .setImage(product.image_url)
+        .setTimestamp()] }).catch(() => {});
+    }
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle("✅ Ordine Confermato")
+      .setDescription(`Hai ordinato **${product.name}**. Il pacco è stato confermato dopo il pagamento.`)
+      .addFields(
+        { name: "Negozio", value: getShopName(product.shop_key), inline: true },
+        { name: "Pagato", value: euros(price), inline: true },
+        { name: "Saldo rimanente", value: euros(result.buyerBalance), inline: true }
+      )
+      .setImage(product.image_url)
+      .setTimestamp()] });
+  } catch (error) {
+    if (error.message === "INSUFFICIENT_FUNDS") return interaction.editReply({ embeds: [err("Saldo insufficiente per comprare questo prodotto.")] });
+    if (error.message === "SELLER_ACCOUNT_MISSING") return interaction.editReply({ embeds: [err("Il venditore non ha più un conto bancario valido.")] });
+    if (error.message === "BUYER_ACCOUNT_MISSING") return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
+    console.error("Errore acquisto online:", error);
+    return interaction.editReply({ embeds: [err("Errore durante l'acquisto online. Riprova più tardi.")] });
+  }
+}
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 client.once("ready", async (rc) => {
   console.log(`Bot online: ${rc.user.tag}`);
@@ -872,6 +1198,21 @@ client.on("interactionCreate", async (interaction) => {
     }
     if (interaction.isButton() && interaction.customId.startsWith("carta_completa_")) {
       await handleFullCardButton(interaction);
+    }
+    if (interaction.isButton() && interaction.customId === "online_shop_open") {
+      await handleOnlineShopOpen(interaction);
+    }
+    if (interaction.isStringSelectMenu() && interaction.customId === "online_shop_select") {
+      await handleOnlineShopSelect(interaction);
+    }
+    if (interaction.isStringSelectMenu() && interaction.customId === "online_product_select") {
+      await handleOnlineProductSelect(interaction);
+    }
+    if (interaction.isButton() && interaction.customId.startsWith("online_buy_")) {
+      await handleOnlineBuyButton(interaction);
+    }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("online_pin_")) {
+      await handleOnlinePinModal(interaction);
     }
   } catch (e) {
     console.error(e);
