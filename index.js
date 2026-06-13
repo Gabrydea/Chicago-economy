@@ -2,7 +2,8 @@ const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuild
 const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
-const { createCanvas, loadImage } = require("canvas");
+const path = require("path");
+const { createCanvas, loadImage, registerFont } = require("canvas");
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => { res.writeHead(200); res.end("Bot online!"); }).listen(PORT, () => {
   console.log(`Health check su porta ${PORT}`);
@@ -22,6 +23,7 @@ const DEFAULT_ROLE_SALARIES = {
   "1504115728859529371": 150,
   "1504115619291730041": 100,
 };
+const CARD_FONT_FAMILY = "ChicagoCardSans";
 const salaryCache = new Map();
 if (!token) { console.error("DISCORD_BOT_TOKEN mancante"); process.exit(1); }
 if (!dbUrl) { console.error("DATABASE_URL mancante"); process.exit(1); }
@@ -153,9 +155,40 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.quadraticCurveTo(x, y, x + r, y);
   ctx.closePath();
 }
+let cardFontsLoaded = false;
+function ensureCardFonts() {
+  if (cardFontsLoaded) return;
+  try {
+    registerFont(path.join(__dirname, "assets", "fonts", "NotoSans-Regular.ttf"), {
+      family: CARD_FONT_FAMILY,
+      weight: "normal",
+    });
+    registerFont(path.join(__dirname, "assets", "fonts", "NotoSans-Bold.ttf"), {
+      family: CARD_FONT_FAMILY,
+      weight: "bold",
+    });
+    cardFontsLoaded = true;
+    console.log("Font carta caricati.");
+  } catch (error) {
+    console.error("Impossibile caricare i font della carta, uso fallback di sistema.", error);
+  }
+}
+function setCardFont(ctx, size, { bold = false } = {}) {
+  ctx.font = `${bold ? "bold " : ""}${size}px "${CARD_FONT_FAMILY}", sans-serif`;
+}
+function drawCardText(ctx, text, x, y, { color = "#ffffff", stroke = "rgba(0,0,0,0.55)", lineWidth = 3 } = {}) {
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = lineWidth;
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
 async function generateCardImage(user, nome, cognome, createdAt, { isPublic = true, pin = null } = {}) {
+  ensureCardFonts();
   const canvas = createCanvas(860, 540);
   const ctx = canvas.getContext("2d");
+  if ("textDrawingMode" in ctx) ctx.textDrawingMode = "glyph";
   const bg = ctx.createLinearGradient(0, 0, 860, 540);
   bg.addColorStop(0, "#0f0c29");
   bg.addColorStop(0.5, "#302b63");
@@ -174,30 +207,40 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   ctx.strokeStyle = "#D4AF37";
   ctx.lineWidth = 2.5;
   ctx.stroke();
+  roundRect(ctx, 40, 46, 470, isPublic ? 300 : 350, 22);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+  ctx.fill();
   const accent = ctx.createLinearGradient(40, 40, 400, 120);
   accent.addColorStop(0, "#f5d76e");
   accent.addColorStop(1, "#D4AF37");
   ctx.fillStyle = accent;
-  ctx.font = "bold 22px sans-serif";
-  ctx.fillText("CHICAGO CITY RP", 48, 72);
-  ctx.fillStyle = "rgba(212, 175, 55, 0.85)";
-  ctx.font = "14px sans-serif";
-  ctx.fillText(isPublic ? "CARTA IDENTITÀ · VERSIONE PUBBLICA" : "CARTA IDENTITÀ · VERSIONE COMPLETA", 48, 98);
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 42px sans-serif";
-  ctx.fillText(nome.toUpperCase(), 48, 170);
+  setCardFont(ctx, 22, { bold: true });
+  drawCardText(ctx, "CHICAGO CITY RP", 48, 72, { color: accent, stroke: "rgba(0,0,0,0.7)", lineWidth: 4 });
+  setCardFont(ctx, 14);
+  drawCardText(ctx, isPublic ? "CARTA IDENTITÀ · VERSIONE PUBBLICA" : "CARTA IDENTITÀ · VERSIONE COMPLETA", 48, 98, {
+    color: "rgba(255, 231, 166, 0.95)",
+    stroke: "rgba(0,0,0,0.7)",
+    lineWidth: 3,
+  });
+  setCardFont(ctx, 42, { bold: true });
+  drawCardText(ctx, nome.toUpperCase(), 48, 170, { color: "#ffffff", stroke: "rgba(0,0,0,0.78)", lineWidth: 5 });
   if (!isPublic && cognome) {
-    ctx.fillStyle = "#D4AF37";
-    ctx.font = "bold 34px sans-serif";
-    ctx.fillText(cognome.toUpperCase(), 48, 220);
+    setCardFont(ctx, 34, { bold: true });
+    drawCardText(ctx, cognome.toUpperCase(), 48, 220, { color: "#f5d76e", stroke: "rgba(0,0,0,0.78)", lineWidth: 4 });
   }
   const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
-  ctx.fillStyle = "rgba(255,255,255,0.75)";
-  ctx.font = "16px sans-serif";
-  ctx.fillText(`Membro dal ${dataCreazione}`, 48, isPublic ? 230 : 280);
-  ctx.fillStyle = "#D4AF37";
-  ctx.font = "16px sans-serif";
-  ctx.fillText(`@${user.username}`, 48, isPublic ? 265 : 315);
+  setCardFont(ctx, 16, { bold: true });
+  drawCardText(ctx, `Membro dal ${dataCreazione}`, 48, isPublic ? 230 : 280, {
+    color: "rgba(255,255,255,0.92)",
+    stroke: "rgba(0,0,0,0.72)",
+    lineWidth: 3,
+  });
+  setCardFont(ctx, 16, { bold: true });
+  drawCardText(ctx, `@${user.username}`, 48, isPublic ? 265 : 315, {
+    color: "#f5d76e",
+    stroke: "rgba(0,0,0,0.72)",
+    lineWidth: 3,
+  });
   if (!isPublic && pin) {
     roundRect(ctx, 48, 350, 220, 56, 12);
     ctx.fillStyle = "rgba(212, 175, 55, 0.15)";
@@ -205,13 +248,15 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
     ctx.strokeStyle = "#D4AF37";
     ctx.lineWidth = 1.5;
     ctx.stroke();
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 24px sans-serif";
-    ctx.fillText(`PIN · ${pin}`, 64, 385);
+    setCardFont(ctx, 24, { bold: true });
+    drawCardText(ctx, `PIN · ${pin}`, 64, 385, { color: "#ffffff", stroke: "rgba(0,0,0,0.72)", lineWidth: 4 });
   } else if (isPublic) {
-    ctx.fillStyle = "rgba(255,255,255,0.45)";
-    ctx.font = "14px sans-serif";
-    ctx.fillText("Dati sensibili nascosti", 48, 310);
+    setCardFont(ctx, 14, { bold: true });
+    drawCardText(ctx, "Dati sensibili nascosti", 48, 310, {
+      color: "rgba(255,255,255,0.82)",
+      stroke: "rgba(0,0,0,0.72)",
+      lineWidth: 3,
+    });
   }
   const avatarUrl = user.displayAvatarURL({ extension: "png", size: 256 });
   const avatarImage = await loadImage(avatarUrl);
@@ -228,17 +273,26 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   ctx.clip();
   ctx.drawImage(avatarImage, avatarX - avatarRadius, avatarY - avatarRadius, avatarRadius * 2, avatarRadius * 2);
   ctx.restore();
-  ctx.fillStyle = "rgba(212, 175, 55, 0.9)";
-  ctx.font = "bold 16px sans-serif";
-  ctx.fillText("Chicago City Rp Card", 48, 490);
+  setCardFont(ctx, 16, { bold: true });
+  drawCardText(ctx, "Chicago City Rp Card", 48, 490, {
+    color: "rgba(245, 215, 110, 0.95)",
+    stroke: "rgba(0,0,0,0.72)",
+    lineWidth: 3,
+  });
   if (isPublic) {
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.font = "12px sans-serif";
-    ctx.fillText("Solo il proprietario può richiedere la versione completa", 48, 512);
+    setCardFont(ctx, 12, { bold: true });
+    drawCardText(ctx, "Solo il proprietario può richiedere la versione completa", 48, 512, {
+      color: "rgba(255,255,255,0.72)",
+      stroke: "rgba(0,0,0,0.7)",
+      lineWidth: 2,
+    });
   } else {
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.font = "12px sans-serif";
-    ctx.fillText("Documento riservato — non condividere", 48, 512);
+    setCardFont(ctx, 12, { bold: true });
+    drawCardText(ctx, "Documento riservato — non condividere", 48, 512, {
+      color: "rgba(255,255,255,0.72)",
+      stroke: "rgba(0,0,0,0.7)",
+      lineWidth: 2,
+    });
   }
   return canvas.toBuffer("image/png");
 }
