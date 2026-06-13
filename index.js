@@ -2,56 +2,58 @@ const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuild
 const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
-const { createCanvas, registerFont, loadImage } = require("canvas");
-const fs = require("fs");
-const path = require("path");
-
+const { createCanvas, loadImage } = require("canvas");
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => { res.writeHead(200); res.end("Bot online!"); }).listen(PORT, () => {
   console.log(`Health check su porta ${PORT}`);
 });
-
 const token = process.env.DISCORD_BOT_TOKEN;
 const dbUrl = process.env.DATABASE_URL;
 const STAFF_ROLE_ID = "1504115375577497600";
-
-// ID dell'utente da contattare se non si ha un ruolo lavorativo
 const CONTACT_USER_ID = "1141049314433573044";
-
-// Stipendi per ruolo di DEFAULT. La chiave è l'ID del ruolo, il valore è lo stipendio mensile.
-// Questi valori vengono inseriti nel database al primo avvio. Dopodiché gli stipendi
-// possono essere modificati a runtime con i comandi staff (/setstipendio, /rimuovistipendio).
-// Se un utente ha più ruoli, gli stipendi vengono SOMMATI.
 const DEFAULT_ROLE_SALARIES = {
-  "1514961491433099386": 150, // canta
-  "1514960724626116721": 100, // aggiusta le macchine
-  "1512153845373993001": 200, // forze dell'ordine
-  "1512029409211715715": 200, // curano i cittadini
-  "1504115591676559533": 250, // controllano la città
-  "1504115627844042905": 100, // vende gelati
-  "1504115690116874311": 100, // vende pizze
-  "1504115728859529371": 150, // vende bevande
-  "1504115619291730041": 100, // vende cibo
+  "1514961491433099386": 150,
+  "1514960724626116721": 100,
+  "1512153845373993001": 200,
+  "1512029409211715715": 200,
+  "1504115591676559533": 250,
+  "1504115627844042905": 100,
+  "1504115690116874311": 100,
+  "1504115728859529371": 150,
+  "1504115619291730041": 100,
 };
-
-// Cache in memoria degli stipendi: Map<guildId, Map<roleId, importo>>
 const salaryCache = new Map();
-
 if (!token) { console.error("DISCORD_BOT_TOKEN mancante"); process.exit(1); }
 if (!dbUrl) { console.error("DATABASE_URL mancante"); process.exit(1); }
-
 const pool = new Pool({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
-
 async function query(sql, params = []) {
   const client = await pool.connect();
   try { return await client.query(sql, params); }
   finally { client.release(); }
 }
-
 function hashPin(pin) {
   return crypto.createHash("sha256").update(String(pin)).digest("hex");
 }
-
+function getPinEncryptionKey() {
+  const secret = process.env.PIN_ENCRYPTION_SECRET || token;
+  return crypto.createHash("sha256").update(secret).digest();
+}
+function encryptPin(pin) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-cbc", getPinEncryptionKey(), iv);
+  let enc = cipher.update(String(pin), "utf8", "hex");
+  enc += cipher.final("hex");
+  return `${iv.toString("hex")}:${enc}`;
+}
+function decryptPin(pinEnc) {
+  if (!pinEnc) return null;
+  const [ivHex, enc] = pinEnc.split(":");
+  const iv = Buffer.from(ivHex, "hex");
+  const decipher = crypto.createDecipheriv("aes-256-cbc", getPinEncryptionKey(), iv);
+  let dec = decipher.update(enc, "hex", "utf8");
+  dec += decipher.final("utf8");
+  return dec;
+}
 async function setupDb() {
   await query(`CREATE TABLE IF NOT EXISTS bank_accounts (
     id SERIAL PRIMARY KEY,
@@ -79,6 +81,7 @@ async function setupDb() {
     guild_id TEXT NOT NULL,
     nome TEXT NOT NULL,
     cognome TEXT NOT NULL,
+    pin_enc TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(user_id, guild_id)
   )`);
@@ -90,10 +93,9 @@ async function setupDb() {
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(guild_id, role_id)
   )`);
+  await query(`ALTER TABLE cards ADD COLUMN IF NOT EXISTS pin_enc TEXT`).catch(() => {});
   console.log("Database pronto.");
 }
-
-// Carica gli stipendi di una guild dal DB nella cache in memoria.
 async function loadSalaries(guildId) {
   const { rows } = await query("SELECT role_id, amount FROM role_salaries WHERE guild_id=$1", [guildId]);
   const map = new Map();
@@ -101,14 +103,10 @@ async function loadSalaries(guildId) {
   salaryCache.set(guildId, map);
   return map;
 }
-
-// Ritorna la mappa stipendi di una guild (dalla cache o caricandola dal DB).
 async function getSalaries(guildId) {
   if (salaryCache.has(guildId)) return salaryCache.get(guildId);
   return await loadSalaries(guildId);
 }
-
-// Inserisce gli stipendi di default per una guild solo se non ne ha ancora nessuno.
 async function seedDefaultSalaries(guildId) {
   const { rows } = await query("SELECT COUNT(*)::int AS n FROM role_salaries WHERE guild_id=$1", [guildId]);
   if (rows[0].n > 0) return;
@@ -121,23 +119,16 @@ async function seedDefaultSalaries(guildId) {
   await loadSalaries(guildId);
   console.log(`Stipendi di default inseriti per la guild ${guildId}`);
 }
-
 async function getAccount(userId, guildId) {
   const { rows } = await query("SELECT * FROM bank_accounts WHERE user_id=$1 AND guild_id=$2", [userId, guildId]);
   return rows[0] || null;
 }
-
 async function getCard(userId, guildId) {
   const { rows } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [userId, guildId]);
   return rows[0] || null;
 }
-
 function euros(n) { return `**${Number(n).toLocaleString("it-IT")} €**`; }
 function err(msg) { return new EmbedBuilder().setColor(0xe74c3c).setTitle("❌ Errore").setDescription(msg); }
-
-// Calcola lo stipendio di un membro sommando lo stipendio di ogni ruolo lavorativo posseduto.
-// "salaries" è la Map<roleId, importo> della guild.
-// Ritorna { totale, ruoli } dove "ruoli" è l'elenco dei ruoli lavorativi posseduti.
 function calcolaStipendio(member, salaries) {
   let totale = 0;
   const ruoli = [];
@@ -149,92 +140,108 @@ function calcolaStipendio(member, salaries) {
   }
   return { totale, ruoli };
 }
-
-// Funzione per generare l'immagine della carta
-async function generateCardImage(user, member, nome, cognome, createdAt) {
-  try {
-    const canvas = createCanvas(800, 500);
-    const ctx = canvas.getContext("2d");
-
-    // Sfondo con gradiente "tramonto di Chicago" (disegnato, nessun file esterno)
-    const gradient = ctx.createLinearGradient(0, 0, 0, 500);
-    gradient.addColorStop(0, "#1a1a2e");   // cielo notturno in alto
-    gradient.addColorStop(0.45, "#7b3f1d"); // arancione scuro
-    gradient.addColorStop(0.7, "#c2671f");  // arancione tramonto
-    gradient.addColorStop(1, "#0d0d14");    // acqua scura in basso
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, 800, 500);
-
-    // Overlay scuro per leggibilità del testo
-    ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
-    ctx.fillRect(0, 0, 800, 500);
-
-    // Disegna il bordo della carta (oro)
-    ctx.strokeStyle = "#D4AF37";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(15, 15, 770, 470);
-
-    // Carica la foto del profilo Discord
-    const avatarUrl = user.displayAvatarURL({ extension: "png", size: 256 });
-    const avatarImage = await loadImage(avatarUrl);
-
-    // Disegna la foto a destra (circolare)
-    const avatarX = 680;
-    const avatarY = 150;
-    const avatarRadius = 90;
-
-    ctx.beginPath();
-    ctx.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2);
-    ctx.fillStyle = "#D4AF37";
-    ctx.fill();
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = "#D4AF37";
-    ctx.stroke();
-
-    // Disegna l'avatar dentro il cerchio
-    ctx.beginPath();
-    ctx.arc(avatarX, avatarY, avatarRadius - 4, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.drawImage(avatarImage, avatarX - avatarRadius + 4, avatarY - avatarRadius + 4, (avatarRadius - 4) * 2, (avatarRadius - 4) * 2);
-    ctx.restore();
-
-    // Testo a sinistra
-    ctx.fillStyle = "#FFFFFF";
-    ctx.font = "bold 32px Arial";
-    ctx.fillText(nome, 40, 120);
-
-    ctx.font = "bold 32px Arial";
-    ctx.fillStyle = "#D4AF37";
-    ctx.fillText(cognome, 40, 170);
-
-    // Data di creazione
-    const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT");
-    ctx.font = "16px Arial";
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillText(`Data apertura: ${dataCreazione}`, 40, 250);
-
-    // Username Discord
-    ctx.font = "16px Arial";
-    ctx.fillStyle = "#D4AF37";
-    ctx.fillText(`@${user.username}`, 40, 280);
-
-    // PIN (nascosto con asterischi per l'anteprima)
-    ctx.font = "20px Arial";
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillText("PIN: ****", 40, 350);
-
-    // Logo Chicago City Rp Card
-    ctx.font = "bold 18px Arial";
-    ctx.fillStyle = "#D4AF37";
-    ctx.fillText("Chicago City Rp Card", 40, 450);
-
-    return canvas.toBuffer("image/png");
-  } catch (error) {
-    console.error("Errore nella generazione della carta:", error);
-    throw error;
-  }
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }
-
+async function generateCardImage(user, nome, cognome, createdAt, { isPublic = true, pin = null } = {}) {
+  const canvas = createCanvas(860, 540);
+  const ctx = canvas.getContext("2d");
+  const bg = ctx.createLinearGradient(0, 0, 860, 540);
+  bg.addColorStop(0, "#0f0c29");
+  bg.addColorStop(0.5, "#302b63");
+  bg.addColorStop(1, "#24243e");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, 860, 540);
+  ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+  for (let i = 0; i < 6; i++) {
+    ctx.beginPath();
+    ctx.arc(120 + i * 130, 80 + (i % 2) * 40, 90, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  roundRect(ctx, 24, 24, 812, 492, 28);
+  ctx.fillStyle = "rgba(10, 10, 20, 0.55)";
+  ctx.fill();
+  ctx.strokeStyle = "#D4AF37";
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  const accent = ctx.createLinearGradient(40, 40, 400, 120);
+  accent.addColorStop(0, "#f5d76e");
+  accent.addColorStop(1, "#D4AF37");
+  ctx.fillStyle = accent;
+  ctx.font = "bold 22px Arial";
+  ctx.fillText("CHICAGO CITY RP", 48, 72);
+  ctx.fillStyle = "rgba(212, 175, 55, 0.85)";
+  ctx.font = "14px Arial";
+  ctx.fillText(isPublic ? "CARTA IDENTITÀ · VERSIONE PUBBLICA" : "CARTA IDENTITÀ · VERSIONE COMPLETA", 48, 98);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 42px Arial";
+  ctx.fillText(nome.toUpperCase(), 48, 170);
+  if (!isPublic && cognome) {
+    ctx.fillStyle = "#D4AF37";
+    ctx.font = "bold 34px Arial";
+    ctx.fillText(cognome.toUpperCase(), 48, 220);
+  }
+  const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.font = "16px Arial";
+  ctx.fillText(`Membro dal ${dataCreazione}`, 48, isPublic ? 230 : 280);
+  ctx.fillStyle = "#D4AF37";
+  ctx.font = "16px Arial";
+  ctx.fillText(`@${user.username}`, 48, isPublic ? 265 : 315);
+  if (!isPublic && pin) {
+    roundRect(ctx, 48, 350, 220, 56, 12);
+    ctx.fillStyle = "rgba(212, 175, 55, 0.15)";
+    ctx.fill();
+    ctx.strokeStyle = "#D4AF37";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 24px Arial";
+    ctx.fillText(`PIN · ${pin}`, 64, 385);
+  } else if (isPublic) {
+    ctx.fillStyle = "rgba(255,255,255,0.45)";
+    ctx.font = "14px Arial";
+    ctx.fillText("Dati sensibili nascosti", 48, 310);
+  }
+  const avatarUrl = user.displayAvatarURL({ extension: "png", size: 256 });
+  const avatarImage = await loadImage(avatarUrl);
+  const avatarX = 680;
+  const avatarY = 270;
+  const avatarRadius = 88;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(avatarX, avatarY, avatarRadius + 6, 0, Math.PI * 2);
+  ctx.fillStyle = "#D4AF37";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(avatarImage, avatarX - avatarRadius, avatarY - avatarRadius, avatarRadius * 2, avatarRadius * 2);
+  ctx.restore();
+  ctx.fillStyle = "rgba(212, 175, 55, 0.9)";
+  ctx.font = "bold 16px Arial";
+  ctx.fillText("Chicago City Rp Card", 48, 490);
+  if (isPublic) {
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.font = "12px Arial";
+    ctx.fillText("Solo il proprietario può richiedere la versione completa", 48, 512);
+  } else {
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.font = "12px Arial";
+    ctx.fillText("Documento riservato — non condividere", 48, 512);
+  }
+  return canvas.toBuffer("image/png");
+}
 async function pagareStipendiGuild(client) {
   const now = new Date();
   if (now.getDate() !== 1) return;
@@ -243,12 +250,8 @@ async function pagareStipendiGuild(client) {
     "SELECT * FROM bank_accounts WHERE (salary_paid_month IS NULL OR salary_paid_month != $1)",
     [mese]
   );
-
-  // Cache delle guild per non rifare il fetch ogni volta
   const guildCache = new Map();
-
   for (const acc of rows) {
-    // Recupera la guild
     let guild = guildCache.get(acc.guild_id);
     if (guild === undefined) {
       try {
@@ -259,8 +262,6 @@ async function pagareStipendiGuild(client) {
       guildCache.set(acc.guild_id, guild);
     }
     if (!guild) continue;
-
-    // Recupera il membro per leggere i suoi ruoli
     let member;
     try {
       member = await guild.members.fetch(acc.user_id);
@@ -268,15 +269,12 @@ async function pagareStipendiGuild(client) {
       member = null;
     }
     if (!member) continue;
-
     const salaries = await getSalaries(acc.guild_id);
     const { totale, ruoli } = calcolaStipendio(member, salaries);
-
-    // Nessun ruolo lavorativo: avvisa in DM di contattare il referente
     if (totale <= 0) {
       try {
-        const user = await client.users.fetch(acc.user_id);
-        await user.send({ embeds: [new EmbedBuilder().setColor(0xe67e22)
+        const u = await client.users.fetch(acc.user_id);
+        await u.send({ embeds: [new EmbedBuilder().setColor(0xe67e22)
           .setTitle("⚠️ Nessuno Stipendio Questo Mese")
           .setDescription(`Non hai nessun ruolo lavorativo assegnato, quindi non puoi ricevere lo stipendio mensile.\n\n> Contatta <@${CONTACT_USER_ID}> per farti assegnare un ruolo e iniziare a guadagnare!`)
           .setTimestamp()] });
@@ -284,8 +282,6 @@ async function pagareStipendiGuild(client) {
       console.log(`Nessun ruolo lavorativo per ${acc.user_id} (guild: ${acc.guild_id}) - avviso inviato`);
       continue;
     }
-
-    // Accredita lo stipendio sommato dei ruoli
     await query(
       "UPDATE bank_accounts SET balance=balance+$1, salary_paid_month=$2 WHERE user_id=$3 AND guild_id=$4",
       [totale, mese, acc.user_id, acc.guild_id]
@@ -294,13 +290,10 @@ async function pagareStipendiGuild(client) {
       "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES(NULL,$1,$2,$3,'Stipendio mensile automatico','stipendio')",
       [acc.user_id, acc.guild_id, totale]
     );
-
-    // Dettaglio dei ruoli per il messaggio
     const dettaglioRuoli = ruoli.map(r => `<@&${r.roleId}> → ${euros(r.importo)}`).join("\n");
-
     try {
-      const user = await client.users.fetch(acc.user_id);
-      await user.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      const u = await client.users.fetch(acc.user_id);
+      await u.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
         .setTitle("💰 Stipendio Accreditato!")
         .setDescription(`Il tuo stipendio mensile di ${euros(totale)} è stato accreditato sul tuo conto bancario! 🎉`)
         .addFields({ name: "Dettaglio ruoli", value: dettaglioRuoli })
@@ -309,23 +302,19 @@ async function pagareStipendiGuild(client) {
     console.log(`Stipendio di ${totale} pagato a ${acc.user_id} (guild: ${acc.guild_id})`);
   }
 }
-
 const commands = [
   new SlashCommandBuilder()
     .setName("apriconto")
     .setDescription("Apri un conto bancario per ricevere lo stipendio mensile"),
-
   new SlashCommandBuilder()
     .setName("creapin")
     .setDescription("Crea il PIN del tuo conto bancario (4 cifre)")
     .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
-
   new SlashCommandBuilder()
     .setName("modificapin")
     .setDescription("Modifica il PIN del tuo conto bancario")
     .addIntegerOption(o => o.setName("vecchiopin").setDescription("Il PIN attuale").setRequired(true).setMinValue(1000).setMaxValue(9999))
     .addIntegerOption(o => o.setName("nuovopin").setDescription("Il nuovo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
-
   new SlashCommandBuilder()
     .setName("paga")
     .setDescription("Paga un utente con soldi dal tuo conto bancario")
@@ -333,56 +322,69 @@ const commands = [
     .addIntegerOption(o => o.setName("importo").setDescription("Quanti euro inviare").setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName("motivo").setDescription("Motivo del pagamento").setRequired(true))
     .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN per confermare").setRequired(true).setMinValue(1000).setMaxValue(9999)),
-
   new SlashCommandBuilder()
     .setName("sequestra")
     .setDescription("[SOLO STAFF] Sequestra soldi da un utente")
     .addUserOption(o => o.setName("utente").setDescription("Utente a cui sequestrare i soldi").setRequired(true))
     .addIntegerOption(o => o.setName("importo").setDescription("Importo da sequestrare").setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName("motivo").setDescription("Motivo del sequestro").setRequired(false)),
-
   new SlashCommandBuilder()
     .setName("saldo")
     .setDescription("Controlla il saldo del tuo conto bancario"),
-
   new SlashCommandBuilder()
     .setName("stipendio")
     .setDescription("Controlla quanto stipendio mensile ricevi in base ai tuoi ruoli"),
-
   new SlashCommandBuilder()
     .setName("tassa")
     .setDescription("[SOLO STAFF] Applica una tassa a tutti i conti bancari del server")
     .addIntegerOption(o => o.setName("percentuale").setDescription("Percentuale da tassare (1-50%)").setRequired(true).setMinValue(1).setMaxValue(50))
     .addStringOption(o => o.setName("motivo").setDescription("Motivo della tassa").setRequired(false)),
-
   new SlashCommandBuilder()
     .setName("creacarta")
     .setDescription("Crea la tua carta Chicago City Rp Card")
     .addStringOption(o => o.setName("nome").setDescription("Il tuo nome").setRequired(true))
     .addStringOption(o => o.setName("cognome").setDescription("Il tuo cognome").setRequired(true))
     .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
-
+  new SlashCommandBuilder()
+    .setName("mostracarta")
+    .setDescription("Mostra la tua carta nel canale (versione pubblica)")
+    .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN per confermare").setRequired(true).setMinValue(1000).setMaxValue(9999)),
   new SlashCommandBuilder()
     .setName("setstipendio")
     .setDescription("[SOLO STAFF] Imposta o modifica lo stipendio mensile di un ruolo")
     .addRoleOption(o => o.setName("ruolo").setDescription("Il ruolo a cui assegnare lo stipendio").setRequired(true))
     .addIntegerOption(o => o.setName("importo").setDescription("Stipendio mensile in euro").setRequired(true).setMinValue(0)),
-
   new SlashCommandBuilder()
     .setName("rimuovistipendio")
     .setDescription("[SOLO STAFF] Rimuove lo stipendio associato a un ruolo")
     .addRoleOption(o => o.setName("ruolo").setDescription("Il ruolo da cui rimuovere lo stipendio").setRequired(true)),
-
   new SlashCommandBuilder()
     .setName("listastipendi")
     .setDescription("[SOLO STAFF] Mostra tutti gli stipendi per ruolo configurati"),
 ];
-
+function buildPublicCardReply(user, imgBuffer) {
+  const attachment = new AttachmentBuilder(imgBuffer, { name: "carta_pubblica.png" });
+  const fullCardButton = new ButtonBuilder()
+    .setCustomId(`carta_completa_${user.id}`)
+    .setLabel("🔐 Vedi carta completa")
+    .setStyle(ButtonStyle.Secondary);
+  const row = new ActionRowBuilder().addComponents(fullCardButton);
+  return {
+    content: "",
+    embeds: [new EmbedBuilder().setColor(0xD4AF37)
+      .setTitle("💳 Chicago City Rp Card")
+      .setDescription(`${user} ha mostrato la propria carta identità.\n*Versione pubblica — cognome e PIN nascosti.*`)
+      .setImage("attachment://carta_pubblica.png")
+      .setFooter({ text: "Solo il proprietario può richiedere la carta completa via DM" })
+      .setTimestamp()],
+    files: [attachment],
+    components: [row],
+  };
+}
 async function handleCommand(interaction) {
   const { commandName, user, guildId, member } = interaction;
-  const ephemeral = ["saldo", "paga", "creacarta", "stipendio", "setstipendio", "rimuovistipendio", "listastipendi"].includes(commandName);
+  const ephemeral = ["saldo", "paga", "stipendio", "setstipendio", "rimuovistipendio", "listastipendi"].includes(commandName);
   await interaction.deferReply({ ephemeral });
-
   if (commandName === "apriconto") {
     const existing = await getAccount(user.id, guildId);
     if (existing) {
@@ -397,7 +399,6 @@ async function handleCommand(interaction) {
       .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile!`)
       .setTimestamp()] });
   }
-
   if (commandName === "creapin") {
     const acc = await getAccount(user.id, guildId);
     if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
@@ -409,7 +410,6 @@ async function handleCommand(interaction) {
       .setDescription("Il PIN del tuo conto bancario è stato impostato con successo.\n\n✅ Ora riceverai lo **stipendio mensile** il 1° di ogni mese!")
       .setTimestamp()] });
   }
-
   if (commandName === "modificapin") {
     const acc = await getAccount(user.id, guildId);
     if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
@@ -419,12 +419,12 @@ async function handleCommand(interaction) {
     if (hashPin(vecchio) !== acc.pin_hash) return interaction.editReply({ embeds: [err("PIN attuale errato!")] });
     if (vecchio === nuovo) return interaction.editReply({ embeds: [err("Il nuovo PIN deve essere diverso da quello attuale.")] });
     await query("UPDATE bank_accounts SET pin_hash=$1 WHERE user_id=$2 AND guild_id=$3", [hashPin(nuovo), user.id, guildId]);
+    await query("UPDATE cards SET pin_enc=$1 WHERE user_id=$2 AND guild_id=$3", [encryptPin(nuovo), user.id, guildId]);
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("🔐 PIN Modificato!")
       .setDescription("Il tuo PIN è stato aggiornato con successo.")
       .setTimestamp()] });
   }
-
   if (commandName === "paga") {
     const target = interaction.options.getUser("utente", true);
     const importo = interaction.options.getInteger("importo", true);
@@ -460,7 +460,6 @@ async function handleCommand(interaction) {
         { name: "Tuo saldo rimanente", value: euros(mittente.balance - importo) }
       ).setTimestamp()] });
   }
-
   if (commandName === "sequestra") {
     const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
     if (!hasRole) {
@@ -493,7 +492,6 @@ async function handleCommand(interaction) {
         { name: "Saldo residuo", value: euros(vittima.balance - sequestrabile) }
       ).setTimestamp()] });
   }
-
   if (commandName === "tassa") {
     const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
     if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi. Richiede il ruolo Staff.")] });
@@ -532,7 +530,6 @@ async function handleCommand(interaction) {
         { name: "Motivo", value: motivo }
       ).setTimestamp()] });
   }
-
   if (commandName === "setstipendio") {
     const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
     if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi. Richiede il ruolo Staff.")] });
@@ -550,7 +547,6 @@ async function handleCommand(interaction) {
       .setFooter({ text: "La modifica avrà effetto dal prossimo pagamento (1° del mese)." })
       .setTimestamp()] });
   }
-
   if (commandName === "rimuovistipendio") {
     const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
     if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi. Richiede il ruolo Staff.")] });
@@ -563,7 +559,6 @@ async function handleCommand(interaction) {
       .setDescription(`Il ruolo ${ruolo} non riceve più nessuno stipendio mensile.`)
       .setTimestamp()] });
   }
-
   if (commandName === "listastipendi") {
     const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
     if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi. Richiede il ruolo Staff.")] });
@@ -579,7 +574,6 @@ async function handleCommand(interaction) {
       .setFooter({ text: "Chi possiede più ruoli riceve la somma dei rispettivi stipendi." })
       .setTimestamp()] });
   }
-
   if (commandName === "stipendio") {
     const salaries = await getSalaries(guildId);
     const { totale, ruoli } = calcolaStipendio(member, salaries);
@@ -597,54 +591,49 @@ async function handleCommand(interaction) {
       .setFooter({ text: "Lo stipendio viene accreditato automaticamente il 1° di ogni mese." })
       .setTimestamp()] });
   }
-
   if (commandName === "creacarta") {
     const nome = interaction.options.getString("nome", true).trim();
     const cognome = interaction.options.getString("cognome", true).trim();
     const pin = interaction.options.getInteger("pin", true);
     const acc = await getAccount(user.id, guildId);
-
     if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
     if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
     if (hashPin(pin) !== acc.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
-
-    const { rows: existing } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [user.id, guildId]);
-
-    if (existing.length) {
-      await query("UPDATE cards SET nome=$1, cognome=$2 WHERE user_id=$3 AND guild_id=$4", [nome, cognome, user.id, guildId]);
+    const pinEnc = encryptPin(pin);
+    const existing = await getCard(user.id, guildId);
+    if (existing) {
+      await query("UPDATE cards SET nome=$1, cognome=$2, pin_enc=$3 WHERE user_id=$4 AND guild_id=$5", [nome, cognome, pinEnc, user.id, guildId]);
     } else {
-      await query("INSERT INTO cards(user_id,guild_id,nome,cognome) VALUES($1,$2,$3,$4)", [user.id, guildId, nome, cognome]);
+      await query("INSERT INTO cards(user_id,guild_id,nome,cognome,pin_enc) VALUES($1,$2,$3,$4,$5)", [user.id, guildId, nome, cognome, pinEnc]);
     }
-
     await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
-
     try {
-      const imgBuffer = await generateCardImage(user, member, nome, cognome, acc.created_at);
-      const attachment = new AttachmentBuilder(imgBuffer, { name: "carta.png" });
-
-      const showDetailsButton = new ButtonBuilder()
-        .setCustomId(`mostra_dettagli_${user.id}`)
-        .setLabel("🔐 Mostra Dettagli")
-        .setStyle(ButtonStyle.Primary);
-
-      const row = new ActionRowBuilder().addComponents(showDetailsButton);
-
-      return interaction.editReply({
-        content: "",
-        embeds: [new EmbedBuilder().setColor(0xD4AF37)
-          .setTitle("💳 La Tua Carta Chicago City Rp Card")
-          .setDescription(`${user} la tua carta è pronta!`)
-          .setImage("attachment://carta.png")
-          .setTimestamp()],
-        files: [attachment],
-        components: [row]
-      });
+      const card = await getCard(user.id, guildId);
+      const imgBuffer = await generateCardImage(user, nome, cognome, card.created_at, { isPublic: true });
+      return interaction.editReply(buildPublicCardReply(user, imgBuffer));
     } catch (error) {
       console.error("Errore nella generazione della carta:", error);
       return interaction.editReply({ embeds: [err("Errore nella generazione della carta. Riprova più tardi.")] });
     }
   }
-
+  if (commandName === "mostracarta") {
+    const pin = interaction.options.getInteger("pin", true);
+    const acc = await getAccount(user.id, guildId);
+    const card = await getCard(user.id, guildId);
+    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
+    if (!card) return interaction.editReply({ embeds: [err("Non hai ancora una carta. Usa **/creacarta** prima.")] });
+    if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
+    if (hashPin(pin) !== acc.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
+    await query("UPDATE cards SET pin_enc=$1 WHERE user_id=$2 AND guild_id=$3", [encryptPin(pin), user.id, guildId]);
+    await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
+    try {
+      const imgBuffer = await generateCardImage(user, card.nome, card.cognome, card.created_at, { isPublic: true });
+      return interaction.editReply(buildPublicCardReply(user, imgBuffer));
+    } catch (error) {
+      console.error("Errore nella generazione della carta:", error);
+      return interaction.editReply({ embeds: [err("Errore nella generazione della carta. Riprova più tardi.")] });
+    }
+  }
   if (commandName === "saldo") {
     const acc = await getAccount(user.id, guildId);
     if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno.")] });
@@ -669,13 +658,51 @@ async function handleCommand(interaction) {
       ).setTimestamp()] });
   }
 }
-
+async function handleFullCardButton(interaction) {
+  const cardOwnerId = interaction.customId.replace("carta_completa_", "");
+  if (interaction.user.id !== cardOwnerId) {
+    return interaction.reply({
+      content: "❌ Solo il proprietario della carta può vedere la versione completa.",
+      ephemeral: true,
+    });
+  }
+  await interaction.deferReply({ ephemeral: true });
+  const card = await getCard(interaction.user.id, interaction.guildId);
+  if (!card) {
+    return interaction.editReply({ embeds: [err("Carta non trovata. Usa **/creacarta** per crearne una.")] });
+  }
+  const pin = decryptPin(card.pin_enc);
+  if (!pin) {
+    return interaction.editReply({
+      embeds: [err("PIN non disponibile. Usa **/mostracarta** o **/creacarta** inserendo il PIN per aggiornare la carta.")],
+    });
+  }
+  try {
+    const user = await interaction.client.users.fetch(interaction.user.id);
+    const imgBuffer = await generateCardImage(user, card.nome, card.cognome, card.created_at, { isPublic: false, pin });
+    const attachment = new AttachmentBuilder(imgBuffer, { name: "carta_completa.png" });
+    await interaction.user.send({
+      embeds: [new EmbedBuilder().setColor(0xD4AF37)
+        .setTitle("🔐 Carta Completa — Solo per te")
+        .setDescription("Ecco la tua **Chicago City Rp Card** con tutti i dati.\n**Non condividere questo messaggio.**")
+        .setImage("attachment://carta_completa.png")
+        .setTimestamp()],
+      files: [attachment],
+    });
+    return interaction.editReply({
+      content: "✅ Carta completa inviata nei tuoi **messaggi privati (DM)**!",
+    });
+  } catch (error) {
+    console.error("Errore invio carta completa:", error);
+    return interaction.editReply({
+      embeds: [err("Non riesco a scriverti in DM. Abilita i messaggi privati dal server e riprova.")],
+    });
+  }
+}
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
-
 client.once("ready", async (rc) => {
   console.log(`Bot online: ${rc.user.tag}`);
   await setupDb();
-  // Inserisce gli stipendi di default e popola la cache per ogni guild
   for (const guild of rc.guilds.cache.values()) {
     await seedDefaultSalaries(guild.id);
   }
@@ -685,45 +712,13 @@ client.once("ready", async (rc) => {
   setInterval(() => pagareStipendiGuild(rc).catch(console.error), 60 * 60 * 1000);
   await pagareStipendiGuild(rc);
 });
-
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
       await handleCommand(interaction);
     }
-
-    if (interaction.isButton()) {
-      const buttonId = interaction.customId;
-
-      if (buttonId.startsWith("mostra_dettagli_")) {
-        const cardOwnerId = buttonId.split("_")[2];
-
-        // Controlla se il button è cliccato dal proprietario della carta
-        if (interaction.user.id !== cardOwnerId) {
-          return interaction.reply({ content: "❌ Puoi solo vedere i tuoi dettagli!", ephemeral: true });
-        }
-
-        const card = await getCard(interaction.user.id, interaction.guildId);
-        if (!card) {
-          return interaction.reply({ embeds: [err("Carta non trovata.")] , ephemeral: true });
-        }
-
-        const acc = await getAccount(interaction.user.id, interaction.guildId);
-
-        return interaction.reply({
-          embeds: [new EmbedBuilder().setColor(0xD4AF37)
-            .setTitle("💳 Dettagli Carta (Privati)")
-            .addFields(
-              { name: "👤 Nome", value: `${card.nome} ${card.cognome}`, inline: false },
-              { name: "🔐 PIN", value: `**${acc.pin_hash ? "Protetto" : "Non impostato"}**`, inline: false },
-              { name: "💶 Saldo Conto", value: `**${acc.balance} €**`, inline: false },
-              { name: "📅 Data Creazione", value: new Date(card.created_at).toLocaleDateString("it-IT"), inline: false }
-            )
-            .setThumbnail(interaction.user.displayAvatarURL())
-            .setTimestamp()],
-          ephemeral: true
-        });
-      }
+    if (interaction.isButton() && interaction.customId.startsWith("carta_completa_")) {
+      await handleFullCardButton(interaction);
     }
   } catch (e) {
     console.error(e);
@@ -735,5 +730,4 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 });
-
 client.login(token);
