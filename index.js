@@ -298,7 +298,7 @@ function drawSoftLine(ctx, x1, y1, x2, y2, color = "rgba(255,255,255,0.18)") {
   ctx.lineWidth = 1;
   ctx.stroke();
 }
-async function generateCardImage(user, nome, cognome, createdAt, { isPublic = true, pin = null } = {}) {
+async function generateCardImage({ user, nome, cognome, createdAt, isPublic = true, pin = null } = {}) {
   ensureCardFonts();
   const canvas = createCanvas(860, 540);
   const ctx = canvas.getContext("2d");
@@ -799,428 +799,281 @@ async function handleCommand(interaction) {
        ON CONFLICT (guild_id, role_id) DO UPDATE SET amount=EXCLUDED.amount, updated_at=NOW()`,
       [guildId, ruolo.id, importo]
     );
-    await loadSalaries(guildId);
+    salaryCache.delete(guildId);
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("💼 Stipendio Impostato")
-      .setDescription(`Lo stipendio mensile del ruolo ${ruolo} è ora ${euros(importo)}.`)
-      .setFooter({ text: "La modifica avrà effetto dal prossimo pagamento (1° del mese)." })
+      .setTitle("💼 Stipendio Configurato!")
+      .setDescription(`Il ruolo ${ruolo} ora ha uno stipendio mensile assegnato pari a ${euros(importo)}.`)
       .setTimestamp()] });
   }
   if (commandName === "rimuovistipendio") {
     const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
     if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi. Richiede il ruolo Staff.")] });
     const ruolo = interaction.options.getRole("ruolo", true);
-    const { rowCount } = await query("DELETE FROM role_salaries WHERE guild_id=$1 AND role_id=$2", [guildId, ruolo.id]);
-    await loadSalaries(guildId);
-    if (!rowCount) return interaction.editReply({ embeds: [err(`Il ruolo ${ruolo} non aveva nessuno stipendio configurato.`)] });
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe67e22)
-      .setTitle("🗑️ Stipendio Rimosso")
-      .setDescription(`Il ruolo ${ruolo} non riceve più nessuno stipendio mensile.`)
+    await query("DELETE FROM role_salaries WHERE guild_id=$1 AND role_id=$2", [guildId, ruolo.id]);
+    salaryCache.delete(guildId);
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe74c3c)
+      .setTitle("💼 Stipendio Rimosso!")
+      .setDescription(`Lo stipendio associato al ruolo ${ruolo} è stato eliminato con successo.`)
       .setTimestamp()] });
   }
   if (commandName === "listastipendi") {
     const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
     if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi. Richiede il ruolo Staff.")] });
     const salaries = await getSalaries(guildId);
-    if (!salaries.size) {
-      return interaction.editReply({ embeds: [err("Nessuno stipendio per ruolo è configurato. Usa **/setstipendio** per aggiungerne uno.")] });
+    if (!salaries.size) return interaction.editReply({ embeds: [err("Nessuno stipendio configurato in questo server.")] });
+    let desc = "";
+    for (const [roleId, amount] of salaries.entries()) {
+      desc += `<@&${roleId}> → ${euros(amount)}\n`;
     }
-    const entries = [...salaries.entries()].sort((a, b) => b[1] - a[1]);
-    const lista = entries.map(([roleId, importo]) => `<@&${roleId}> → ${euros(importo)}`).join("\n");
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x3498db)
-      .setTitle("📋 Stipendi per Ruolo")
-      .setDescription(lista)
-      .setFooter({ text: "Chi possiede più ruoli riceve la somma dei rispettivi stipendi." })
+      .setTitle("📋 Configurazione Stipendi Mensili")
+      .setDescription(desc)
+      .setTimestamp()] });
+  }
+  if (commandName === "creacarta") {
+    const nome = interaction.options.getString("nome", true);
+    const cognome = interaction.options.getString("cognome", true);
+    const pin = interaction.options.getInteger("pin", true);
+    const acc = await getAccount(user.id, guildId);
+    if (!acc) return interaction.editReply({ embeds: [err("Devi prima aprire un conto bancario con **/apriconto**.")] });
+    await query(
+      `INSERT INTO cards(user_id, guild_id, nome, cognome, pin_enc) VALUES($1,$2,$3,$4,$5)
+       ON CONFLICT (user_id, guild_id) DO UPDATE SET nome=EXCLUDED.nome, cognome=EXCLUDED.cognome, pin_enc=EXCLUDED.pin_enc`,
+      [user.id, guildId, nome, cognome, encryptPin(pin)]
+    );
+    const imgBuffer = await generateCardImage({ user, nome, cognome, createdAt: new Date(), isPublic: true, pin: null });
+    return interaction.editReply(buildPublicCardReply(user, imgBuffer));
+  }
+  if (commandName === "mostracarta") {
+    const target = interaction.options.getUser("utente") ?? user;
+    const cardData = await getCard(target.id, guildId);
+    if (!cardData) return interaction.editReply({ embeds: [err(`Nessuna carta d'identità registrata per ${target}.`)] });
+    const imgBuffer = await generateCardImage({
+      user: target,
+      nome: cardData.nome,
+      cognome: cardData.cognome,
+      createdAt: cardData.created_at || new Date(),
+      isPublic: true,
+      pin: null
+    });
+    return interaction.editReply(buildPublicCardReply(target, imgBuffer));
+  }
+  if (commandName === "saldo") {
+    const acc = await getAccount(user.id, guildId);
+    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario aperto. Usa **/apriconto**.")] });
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x3498db)
+      .setTitle("🏦 Il tuo Saldo Bancario")
+      .setDescription(`Cittadino: ${user}\nSaldo Attuale: ${euros(acc.balance)}`)
       .setTimestamp()] });
   }
   if (commandName === "stipendio") {
     const salaries = await getSalaries(guildId);
     const { totale, ruoli } = calcolaStipendio(member, salaries);
     if (totale <= 0) {
-      return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe67e22)
-        .setTitle("⚠️ Nessuno Stipendio")
-        .setDescription(`Non hai nessun ruolo lavorativo assegnato.\n\n> Contatta <@${CONTACT_USER_ID}> per farti assegnare un ruolo e iniziare a guadagnare!`)
-        .setTimestamp()] });
+      return interaction.editReply({ embeds: [err(`Non hai ruoli lavorativi che prevedono uno stipendio.\n\n> Contatta <@${CONTACT_USER_ID}> per farti assegnare un impiego!`)] });
     }
-    const dettaglioRuoli = ruoli.map(r => `<@&${r.roleId}> → ${euros(r.importo)}`).join("\n");
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x3498db)
-      .setTitle("💰 Il Tuo Stipendio Mensile")
-      .setDescription(`Ogni 1° del mese riceverai un totale di ${euros(totale)}`)
-      .addFields({ name: "Dettaglio ruoli", value: dettaglioRuoli })
-      .setFooter({ text: "Lo stipendio viene accreditato automaticamente il 1° di ogni mese." })
+    const dettaglio = ruoli.map(r => `<@&${r.roleId}> → ${euros(r.importo)}`).join("\n");
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle("💼 Calcolo Stipendio Mensile")
+      .setDescription(`Il 1° del mese riceverai un totale di: ${euros(totale)}`)
+      .addFields({ name: "I tuoi ruoli pagati", value: dettaglio })
       .setTimestamp()] });
-  }
-  if (commandName === "creacarta") {
-    const nome = interaction.options.getString("nome", true).trim();
-    const cognome = interaction.options.getString("cognome", true).trim();
-    const pin = interaction.options.getInteger("pin", true);
-    const acc = await getAccount(user.id, guildId);
-    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-    if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
-    if (hashPin(pin) !== acc.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
-    const pinEnc = encryptPin(pin);
-    const existing = await getCard(user.id, guildId);
-    if (existing) {
-      await query("UPDATE cards SET nome=$1, cognome=$2, pin_enc=$3 WHERE user_id=$4 AND guild_id=$5", [nome, cognome, pinEnc, user.id, guildId]);
-    } else {
-      await query("INSERT INTO cards(user_id,guild_id,nome,cognome,pin_enc) VALUES($1,$2,$3,$4,$5)", [user.id, guildId, nome, cognome, pinEnc]);
-    }
-    await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
-    try {
-      const card = await getCard(user.id, guildId);
-      const imgBuffer = await generateCardImage(user, nome, cognome, card.created_at, { isPublic: true });
-      return interaction.editReply(buildPublicCardReply(user, imgBuffer));
-    } catch (error) {
-      console.error("Errore nella generazione della carta:", error);
-      return interaction.editReply({ embeds: [err("Errore nella generazione della carta. Riprova più tardi.")] });
-    }
-  }
-  if (commandName === "mostracarta") {
-    const target = interaction.options.getUser("utente") ?? user;
-    if (target.bot) return interaction.editReply({ embeds: [err("I bot non hanno una carta identità.")] });
-    const card = await getCard(target.id, guildId);
-    if (!card) {
-      const message = target.id === user.id
-        ? "Non hai ancora una carta. Usa **/creacarta** prima."
-        : `${target} non ha ancora una carta.`;
-      return interaction.editReply({ embeds: [err(message)] });
-    }
-    await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
-    try {
-      const imgBuffer = await generateCardImage(target, card.nome, card.cognome, card.created_at, { isPublic: true });
-      return interaction.editReply(buildPublicCardReply(target, imgBuffer));
-    } catch (error) {
-      console.error("Errore nella generazione della carta:", error);
-      return interaction.editReply({ embeds: [err("Errore nella generazione della carta. Riprova più tardi.")] });
-    }
   }
   if (commandName === "creaprodotto") {
-    const shopKey = interaction.options.getString("negozio", true);
-    const nome = interaction.options.getString("nome", true).trim();
+    const shop = interaction.options.getString("negozio", true);
+    const nome = interaction.options.getString("nome", true);
     const costo = interaction.options.getInteger("costo", true);
-    const immagine = interaction.options.getAttachment("immagine", true);
-    const acc = await getAccount(user.id, guildId);
-    if (!acc) return interaction.editReply({ embeds: [err("Devi avere un conto bancario per vendere prodotti. Usa prima **/apriconto**.")] });
-    if (!isImageAttachment(immagine)) return interaction.editReply({ embeds: [err("L'allegato deve essere una foto/immagine del prodotto.")] });
-    const { rows } = await query(
-      "INSERT INTO products(guild_id, creator_user_id, shop_key, name, price, image_url) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
-      [guildId, user.id, shopKey, nome, costo, immagine.url]
+    const img = interaction.options.getAttachment("immagine", true);
+    if (!isImageAttachment(img)) return interaction.editReply({ embeds: [err("L'allegato deve essere un'immagine valida (PNG/JPG).")] });
+    await query(
+      "INSERT INTO products(guild_id, creator_user_id, shop_key, name, price, image_url) VALUES($1,$2,$3,$4,$5,$6)",
+      [guildId, user.id, shop, nome, costo, img.url]
     );
-    const product = rows[0];
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("🛍️ Prodotto Creato")
-      .setDescription(`Il prodotto è ora disponibile nel negozio **${getShopName(shopKey)}**.`)
+      .setTitle("📦 Prodotto Creato!")
+      .setDescription(`Il tuo prodotto è stato aggiunto al catalogo di **${getShopName(shop)}**!`)
       .addFields(
-        { name: "ID prodotto", value: `#${product.id}`, inline: true },
-        { name: "Nome", value: product.name, inline: true },
-        { name: "Prezzo", value: euros(product.price), inline: true }
-      )
-      .setImage(product.image_url)
-      .setFooter({ text: "Solo chi ha creato il prodotto può eliminarlo." })
-      .setTimestamp()] });
+        { name: "Nome", value: nome, inline: true },
+        { name: "Prezzo", value: euros(costo), inline: true }
+      ).setImage(img.url).setTimestamp()] });
   }
   if (commandName === "eliminaprodotto") {
-    const productId = interaction.options.getInteger("id", true);
-    const product = await getProduct(productId, guildId);
-    if (!product) return interaction.editReply({ embeds: [err("Prodotto non trovato in questo server.")] });
-    if (product.creator_user_id !== user.id) {
-      return interaction.editReply({ embeds: [err("Può eliminare questo prodotto solo chi lo ha creato.")] });
+    const id = interaction.options.getInteger("id", true);
+    const prod = await query("SELECT * FROM products WHERE id=$1 AND guild_id=$2", [id, guildId]);
+    if (!prod.rows.length) return interaction.editReply({ embeds: [err("Nessun prodotto trovato con questo ID.")] });
+    const p = prod.rows[0];
+    if (p.creator_user_id !== user.id && !member.roles.cache.has(STAFF_ROLE_ID)) {
+      return interaction.editReply({ embeds: [err("Puoi eliminare solo i prodotti creati da te.")] });
     }
-    await query("DELETE FROM products WHERE id=$1 AND guild_id=$2", [productId, guildId]);
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe67e22)
+    await query("DELETE FROM products WHERE id=$1 AND guild_id=$2", [id, guildId]);
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe74c3c)
       .setTitle("🗑️ Prodotto Eliminato")
-      .setDescription(`Hai eliminato **${product.name}** da **${getShopName(product.shop_key)}**.`)
+      .setDescription(`Il prodotto **${p.name}** (ID: #${id}) è stato rimosso dal negozio online.`)
       .setTimestamp()] });
   }
   if (commandName === "compraonline") {
-    const immagine = interaction.options.getAttachment("immagine");
-    if (immagine && !isImageAttachment(immagine)) return interaction.editReply({ embeds: [err("L'allegato deve essere un'immagine/banner.")] });
-    const orderButton = new ButtonBuilder()
-      .setCustomId("online_shop_open")
-      .setLabel("🛒 Ordina online")
-      .setStyle(ButtonStyle.Success);
-    const embed = new EmbedBuilder()
-      .setColor(0x2ecc71)
-      .setTitle("📦 Acquisti Online Brookhaven")
-      .setDescription("Premi **Ordina online**, scegli il negozio, seleziona il prodotto e conferma il pagamento con il tuo PIN.")
-      .setFooter({ text: "Il pagamento arriva subito al venditore nel conto del server." })
-      .setTimestamp();
-    if (immagine) embed.setImage(immagine.url);
-    return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(orderButton)] });
-  }
-  if (commandName === "saldo") {
-    const acc = await getAccount(user.id, guildId);
-    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno.")] });
-    const pinStatus = acc.pin_hash ? "✅ PIN impostato" : "❌ PIN non impostato (usa /creapin)";
-    const salaries = await getSalaries(guildId);
-    const { totale } = calcolaStipendio(member, salaries);
-    let stipendioStatus;
-    if (!acc.pin_hash) {
-      stipendioStatus = "❌ Disattivato (imposta il PIN)";
-    } else if (totale <= 0) {
-      stipendioStatus = `⚠️ Nessun ruolo lavorativo (contatta <@${CONTACT_USER_ID}>)`;
-    } else {
-      stipendioStatus = `✅ ${euros(totale)} (1° del mese)`;
-    }
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x3498db)
-      .setTitle("🏦 Il Tuo Conto Bancario")
-      .setThumbnail(user.displayAvatarURL())
-      .addFields(
-        { name: "💶 Saldo", value: euros(acc.balance), inline: true },
-        { name: "🔐 Sicurezza", value: pinStatus, inline: true },
-        { name: "💰 Stipendio", value: stipendioStatus, inline: false }
-      ).setTimestamp()] });
-  }
-}
-async function handleFullCardButton(interaction) {
-  const cardOwnerId = interaction.customId.replace("carta_completa_", "");
-  if (interaction.user.id !== cardOwnerId) {
-    return interaction.reply({
-      content: "❌ Solo il proprietario della carta può vedere la versione completa.",
-      ephemeral: true,
-    });
-  }
-  await interaction.deferReply({ ephemeral: true });
-  const card = await getCard(interaction.user.id, interaction.guildId);
-  if (!card) {
-    return interaction.editReply({ embeds: [err("Carta non trovata. Usa **/creacarta** per crearne una.")] });
-  }
-  let pin = null;
-  try {
-    pin = decryptPin(card.pin_enc);
-  } catch {
-    pin = null;
-  }
-  if (!pin) {
-    return interaction.editReply({
-      embeds: [err("PIN non disponibile. Usa **/creacarta** inserendo il PIN corretto per aggiornare la carta.")],
-    });
-  }
-  try {
-    const user = await interaction.client.users.fetch(interaction.user.id);
-    const imgBuffer = await generateCardImage(user, card.nome, card.cognome, card.created_at, { isPublic: false, pin });
-    const attachment = new AttachmentBuilder(imgBuffer, { name: "carta_completa.png" });
-    await interaction.user.send({
-      embeds: [new EmbedBuilder().setColor(0xD4AF37)
-        .setTitle("🔐 Carta Completa — Solo per te")
-        .setDescription("Ecco la tua **Chicago City Rp Card** con tutti i dati.\n**Non condividere questo messaggio.**")
-        .setImage("attachment://carta_completa.png")
-        .setTimestamp()],
-      files: [attachment],
-    });
-    return interaction.editReply({
-      content: "✅ Carta completa inviata nei tuoi **messaggi privati (DM)**!",
-    });
-  } catch (error) {
-    console.error("Errore invio carta completa:", error);
-    return interaction.editReply({
-      embeds: [err("Non riesco a scriverti in DM. Abilita i messaggi privati dal server e riprova.")],
-    });
-  }
-}
-async function handleOnlineShopOpen(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-  const counts = await getShopProductCounts(interaction.guildId);
-  const countMap = new Map(counts.map(row => [row.shop_key, row.count]));
-  const options = SHOP_CATALOG
-    .filter(shop => countMap.has(shop.value))
-    .map(shop => ({
-      label: shop.name,
-      value: shop.value,
-      description: `${countMap.get(shop.value)} prodotti disponibili`,
-    }));
-  if (!options.length) {
-    return interaction.editReply({ embeds: [err("Non ci sono ancora prodotti online. Usa **/creaprodotto** per aggiungerne uno.")] });
-  }
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId("online_shop_select")
-    .setPlaceholder("Scegli il negozio in cui acquistare")
-    .addOptions(options.slice(0, 25));
-  return interaction.editReply({
-    embeds: [new EmbedBuilder().setColor(0x3498db)
-      .setTitle("🛒 Scegli un negozio")
-      .setDescription("Seleziona il negozio, poi scegli il prodotto da ordinare online.")],
-    components: [new ActionRowBuilder().addComponents(menu)],
-  });
-}
-async function handleOnlineShopSelect(interaction) {
-  const shopKey = interaction.values[0];
-  const products = await listProductsForShop(interaction.guildId, shopKey);
-  if (!products.length) {
-    return interaction.update({ embeds: [err("Questo negozio non ha più prodotti disponibili.")], components: [] });
-  }
-  const productOptions = products.map(product => ({
-    label: shorten(product.name, 90),
-    value: String(product.id),
-    description: shorten(`${Number(product.price).toLocaleString("it-IT")} € · ID #${product.id}`, 100),
-  }));
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId("online_product_select")
-    .setPlaceholder("Scegli il prodotto da ordinare")
-    .addOptions(productOptions);
-  const preview = products.slice(0, 10).map(product => `#${product.id} · **${product.name}** — ${euros(product.price)}`).join("\n");
-  const extra = products.length > 10 ? `\n…e altri ${products.length - 10} prodotti nel menu.` : "";
-  return interaction.update({
-    content: "",
-    embeds: [new EmbedBuilder().setColor(0x3498db)
-      .setTitle(`🏪 ${getShopName(shopKey)}`)
-      .setDescription(`${preview}${extra}`)
-      .setFooter({ text: "Scegli un prodotto per vedere la foto e pagare con PIN." })],
-    components: [new ActionRowBuilder().addComponents(menu)],
-  });
-}
-async function handleOnlineProductSelect(interaction) {
-  const productId = Number(interaction.values[0]);
-  const product = await getProduct(productId, interaction.guildId);
-  if (!product) {
-    return interaction.update({ embeds: [err("Prodotto non più disponibile.")], components: [] });
-  }
-  const buyButton = new ButtonBuilder()
-    .setCustomId(`online_buy_${product.id}`)
-    .setLabel("🔐 Inserisci PIN e paga")
-    .setStyle(ButtonStyle.Success);
-  return interaction.update({
-    content: "",
-    embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle(`📦 ${product.name}`)
-      .setDescription("Conferma l'ordine inserendo il PIN del tuo conto bancario.")
-      .addFields(
-        { name: "Negozio", value: getShopName(product.shop_key), inline: true },
-        { name: "Prezzo", value: euros(product.price), inline: true },
-        { name: "Venditore", value: `<@${product.creator_user_id}>`, inline: true }
-      )
-      .setImage(product.image_url)
-      .setFooter({ text: "Il pacco viene confermato solo dopo il pagamento." })
-      .setTimestamp()],
-    components: [new ActionRowBuilder().addComponents(buyButton)],
-  });
-}
-async function handleOnlineBuyButton(interaction) {
-  const productId = Number(interaction.customId.replace("online_buy_", ""));
-  const product = await getProduct(productId, interaction.guildId);
-  if (!product) return interaction.reply({ content: "❌ Prodotto non più disponibile.", ephemeral: true });
-  if (product.creator_user_id === interaction.user.id) {
-    return interaction.reply({ content: "❌ Non puoi comprare un prodotto creato da te.", ephemeral: true });
-  }
-  const acc = await getAccount(interaction.user.id, interaction.guildId);
-  if (!acc) return interaction.reply({ content: "❌ Non hai un conto bancario. Usa prima **/apriconto**.", ephemeral: true });
-  if (!acc.pin_hash) return interaction.reply({ content: "❌ Non hai ancora un PIN. Usa **/creapin** prima di comprare online.", ephemeral: true });
-
-  const modal = new ModalBuilder()
-    .setCustomId(`online_pin_${product.id}`)
-    .setTitle("Pagamento online");
-  const pinInput = new TextInputBuilder()
-    .setCustomId("pin")
-    .setLabel("Inserisci il PIN del conto")
-    .setPlaceholder("1234")
-    .setMinLength(4)
-    .setMaxLength(4)
-    .setRequired(true)
-    .setStyle(TextInputStyle.Short);
-  modal.addComponents(new ActionRowBuilder().addComponents(pinInput));
-  return interaction.showModal(modal);
-}
-async function handleOnlinePinModal(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-  const productId = Number(interaction.customId.replace("online_pin_", ""));
-  const pin = interaction.fields.getTextInputValue("pin").trim();
-  if (!/^\d{4}$/.test(pin)) {
-    return interaction.editReply({ embeds: [err("Il PIN deve essere composto da 4 cifre.")] });
-  }
-  const product = await getProduct(productId, interaction.guildId);
-  if (!product) return interaction.editReply({ embeds: [err("Prodotto non più disponibile.")] });
-  if (product.creator_user_id === interaction.user.id) {
-    return interaction.editReply({ embeds: [err("Non puoi comprare un prodotto creato da te.")] });
-  }
-  const buyer = await getAccount(interaction.user.id, interaction.guildId);
-  if (!buyer) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-  if (!buyer.pin_hash) return interaction.editReply({ embeds: [err("Non hai ancora un PIN. Usa **/creapin** prima di comprare online.")] });
-  if (hashPin(pin) !== buyer.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Pagamento annullato.")] });
-
-  const price = Number(product.price);
-  try {
-    const result = await completeOnlinePurchase({
-      buyerId: interaction.user.id,
-      sellerId: product.creator_user_id,
-      guildId: interaction.guildId,
-      amount: price,
-      productName: product.name,
-      productId: product.id,
-    });
-    const sellerUser = await interaction.client.users.fetch(product.creator_user_id).catch(() => null);
-    if (sellerUser) {
-      await sellerUser.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-        .setTitle("💸 Vendita Online Ricevuta")
-        .setDescription(`${interaction.user.tag} ha comprato **${product.name}** da **${getShopName(product.shop_key)}**.`)
-        .addFields(
-          { name: "Importo ricevuto", value: euros(price), inline: true },
-          { name: "Saldo nel server", value: euros(result.sellerBalance), inline: true }
-        )
-        .setFooter({ text: "I soldi sono stati accreditati nel tuo conto del server." })
-        .setImage(product.image_url)
-        .setTimestamp()] }).catch(() => {});
-    }
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("✅ Ordine Confermato")
-      .setDescription(`Hai ordinato **${product.name}**. Il pacco è stato confermato dopo il pagamento.`)
-      .addFields(
-        { name: "Negozio", value: getShopName(product.shop_key), inline: true },
-        { name: "Pagato", value: euros(price), inline: true },
-        { name: "Saldo rimanente", value: euros(result.buyerBalance), inline: true }
-      )
-      .setImage(product.image_url)
-      .setTimestamp()] });
-  } catch (error) {
-    if (error.message === "INSUFFICIENT_FUNDS") return interaction.editReply({ embeds: [err("Saldo insufficiente per comprare questo prodotto.")] });
-    if (error.message === "SELLER_ACCOUNT_MISSING") return interaction.editReply({ embeds: [err("Il venditore non ha più un conto bancario valido.")] });
-    if (error.message === "BUYER_ACCOUNT_MISSING") return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-    console.error("Errore acquisto online:", error);
-    return interaction.editReply({ embeds: [err("Errore durante l'acquisto online. Riprova più tardi.")] });
+    const banner = interaction.options.getAttachment("immagine");
+    if (banner && !isImageAttachment(banner)) return interaction.editReply({ embeds: [err("Il banner deve essere un'immagine valida.")] });
+    const counts = await getShopProductCounts(guildId);
+    const activeShops = SHOP_CATALOG.filter(s => counts.some(c => c.shop_key === s.value && c.count > 0));
+    if (!activeShops.length) return interaction.editReply({ embeds: [err("Non ci sono negozi con prodotti disponibili al momento.")] });
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId("shop_select_online")
+      .setPlaceholder("🛒 Scegli una categoria commerciale...")
+      .addOptions(activeShops.map(s => ({
+        label: s.name,
+        value: s.value,
+        description: `Vedi gli articoli del settore ${s.name}`
+      })));
+    const embed = new EmbedBuilder().setColor(0x9b59b6)
+      .setTitle("🌐 Centro Commerciale Online — Chicago City")
+      .setDescription("Benvenuto nel portale dello shopping online di Chicago!\n\n🔹 Usa il menu a tendina qui sotto per selezionare la tipologia di negozio.\n🔹 Sfoglia la vetrina degli articoli caricati dai venditori e acquista in tempo reale col tuo saldo bancario!");
+    if (banner) embed.setImage(banner.url);
+    await interaction.channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(menu)] });
+    return interaction.editReply({ content: "✅ Pannello e-commerce inviato nel canale!" });
   }
 }
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
-client.once("ready", async (rc) => {
-  console.log(`Bot online: ${rc.user.tag}`);
+client.once("ready", async () => {
   await setupDb();
-  for (const guild of rc.guilds.cache.values()) {
-    await seedDefaultSalaries(guild.id);
+  for (const g of client.guilds.cache.values()) {
+    await seedDefaultSalaries(g.id);
   }
-  const rest = new REST().setToken(token);
-  await rest.put(Routes.applicationCommands(rc.user.id), { body: commands.map(c => c.toJSON()) });
-  console.log(`${commands.length} comandi registrati.`);
-  setInterval(() => pagareStipendiGuild(rc).catch(console.error), 60 * 60 * 1000);
-  await pagareStipendiGuild(rc);
-});
-client.on("interactionCreate", async (interaction) => {
+  const rest = new REST({ version: "10" }).setToken(token);
   try {
-    if (interaction.isChatInputCommand()) {
-      await handleCommand(interaction);
+    console.log("Registrazione dei comandi slash globali...");
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log("Comandi registrati globalmente.");
+  } catch (e) { console.error(e); }
+  setInterval(() => pagareStipendiGuild(client), 86400000);
+  console.log(`Bot avviato correttamente come ${client.user.tag}`);
+});
+client.on("interactionCreate", async interaction => {
+  if (interaction.isChatInputCommand()) {
+    try { await handleCommand(interaction); }
+    catch (e) {
+      console.error(e);
+      const embedErr = [err("Si è verificato un errore critico durante l'esecuzione.")];
+      if (interaction.deferred || interaction.replied) await interaction.editReply({ embeds: embedErr }).catch(() => {});
+      else await interaction.reply({ embeds: embedErr, ephemeral: true }).catch(() => {});
     }
-    if (interaction.isButton() && interaction.customId.startsWith("carta_completa_")) {
-      await handleFullCardButton(interaction);
+    return;
+  }
+  if (interaction.isButton() && interaction.customId.startsWith("carta_completa_")) {
+    const proprietarioId = interaction.customId.replace("carta_completa_", "");
+    if (interaction.user.id !== proprietarioId) {
+      return interaction.reply({
+        content: "❌ Non puoi guardare i dati sensibili della carta di un altro cittadino!",
+        ephemeral: true
+      });
     }
-    if (interaction.isButton() && interaction.customId === "online_shop_open") {
-      await handleOnlineShopOpen(interaction);
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const cardData = await getCard(proprietarioId, interaction.guildId);
+      if (!cardData) {
+        return interaction.editReply({ content: "❌ Non ho trovato nessuna carta registrata a tuo nome nel database." });
+      }
+      let pinInChiaro = "1000";
+      if (cardData.pin_enc) {
+        pinInChiaro = decryptPin(cardData.pin_enc) || "1000";
+      }
+      const imgBufferPrivato = await generateCardImage({
+        user: interaction.user,
+        nome: cardData.nome,
+        cognome: cardData.cognome,
+        createdAt: cardData.created_at || new Date(),
+        isPublic: false,
+        pin: pinInChiaro
+      });
+      const attachmentPrivato = new AttachmentBuilder(imgBufferPrivato, { name: "carta_privata.png" });
+      const embedDM = new EmbedBuilder()
+        .setColor(0x2ecc71)
+        .setTitle("🔓 Chicago City Rp Card — Dati Riservati")
+        .setDescription("Ecco la versione completa della tua carta d'identità bancaria. Non mostrare questo screenshot a nessuno!")
+        .setImage("attachment://carta_privata.png")
+        .setTimestamp();
+      await interaction.user.send({ embeds: [embedDM], files: [attachmentPrivato] });
+      return interaction.editReply({ content: "✅ La tua carta completa è stata inviata con successo nei tuoi messaggi privati (DM)!" });
+    } catch (error) {
+      console.error("Errore nell'invio del DM:", error);
+      return interaction.editReply({ content: "❌ Impossibile inviarti il messaggio privato. Controlla di avere i DM aperti per questo server." });
     }
-    if (interaction.isStringSelectMenu() && interaction.customId === "online_shop_select") {
-      await handleOnlineShopSelect(interaction);
-    }
-    if (interaction.isStringSelectMenu() && interaction.customId === "online_product_select") {
-      await handleOnlineProductSelect(interaction);
-    }
-    if (interaction.isButton() && interaction.customId.startsWith("online_buy_")) {
-      await handleOnlineBuyButton(interaction);
-    }
-    if (interaction.isModalSubmit() && interaction.customId.startsWith("online_pin_")) {
-      await handleOnlinePinModal(interaction);
-    }
-  } catch (e) {
-    console.error(e);
-    const msg = "Si è verificato un errore. Riprova.";
-    if (interaction.replied || interaction.deferred) {
-      interaction.followUp({ content: msg, ephemeral: true }).catch(() => {});
-    } else {
-      interaction.reply({ content: msg, ephemeral: true }).catch(() => {});
+  }
+  if (interaction.isStringSelectMenu() && interaction.customId === "shop_select_online") {
+    await interaction.deferReply({ ephemeral: true });
+    const shopKey = interaction.values[0];
+    const prods = await listProductsForShop(interaction.guildId, shopKey);
+    if (!prods.length) return interaction.editReply({ content: "❌ Questo negozio non ha articoli disponibili in catalogo al momento." });
+    const selectMenu = new StringSelectMenuBuilder()
+      .setCustomId(`buy_product_select_${shopKey}`)
+      .setPlaceholder("🛍️ Scegli l'articolo da acquistare...")
+      .addOptions(prods.map(p => ({
+        label: shorten(p.name, 25),
+        value: String(p.id),
+        description: `Prezzo: ${p.price} € | ID: #${p.id}`
+      })));
+    return interaction.editReply({
+      content: `🛒 Benvenuto nel reparto **${getShopName(shopKey)}**! Seleziona un articolo per procedere con la transazione bancaria diretta.`,
+      components: [new ActionRowBuilder().addComponents(selectMenu)]
+    });
+  }
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith("buy_product_select_")) {
+    await interaction.deferReply({ ephemeral: true });
+    const productId = parseInt(interaction.values[0], 10);
+    const p = await getProduct(productId, interaction.guildId);
+    if (!p) return interaction.editReply({ content: "❌ Prodotto non disponibile o eliminato dal proprietario." });
+    if (p.creator_user_id === interaction.user.id) return interaction.editReply({ content: "❌ Non puoi comprare i tuoi stessi prodotti commerciali online!" });
+    const confirmButton = new ButtonBuilder()
+      .setCustomId(`checkout_confirm_${productId}`)
+      .setLabel(`Paga ${p.price} € ed Acquista`)
+      .setStyle(ButtonStyle.Success);
+    const embed = new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle("🛒 Riepilogo Checkout Ordine")
+      .setDescription(`Stai per acquistare il seguente bene digitale tramite addebito automatico diretto sul conto corrente.`)
+      .addFields(
+        { name: "Oggetto", value: p.name, inline: true },
+        { name: "Costo", value: euros(p.price), inline: true },
+        { name: "Esercente", value: `<@${p.creator_user_id}>`, inline: true }
+      ).setImage(p.image_url);
+    return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(confirmButton)] });
+  }
+  if (interaction.isButton() && interaction.customId.startsWith("checkout_confirm_")) {
+    await interaction.deferReply({ ephemeral: true });
+    const productId = parseInt(interaction.customId.replace("checkout_confirm_", ""), 10);
+    const p = await getProduct(productId, interaction.guildId);
+    if (!p) return interaction.editReply({ content: "❌ Errore critico: Questo prodotto non esiste più." });
+    if (p.creator_user_id === interaction.user.id) return interaction.editReply({ content: "❌ Non puoi comprare i tuoi stessi prodotti." });
+    try {
+      const res = await completeOnlinePurchase({
+        buyerId: interaction.user.id,
+        sellerId: p.creator_user_id,
+        guildId: interaction.guildId,
+        amount: Number(p.price),
+        productName: p.name,
+        productId: p.id
+      });
+      try {
+        const merchant = await client.users.fetch(p.creator_user_id);
+        await merchant.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+          .setTitle("💰 Oggetto Venduto Online!")
+          .setDescription(`Un utente ha acquistato un tuo prodotto dal portale e-commerce!`)
+          .addFields(
+            { name: "Prodotto", value: p.name, inline: true },
+            { name: "Ricavo Netto", value: euros(p.price), inline: true },
+            { name: "Acquirente", value: `${interaction.user.tag}`, inline: true }
+          ).setTimestamp()] });
+      } catch {}
+      return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+        .setTitle("🎉 Acquisto Convalidato!")
+        .setDescription(`Hai acquistato **${p.name}** con successo! L'importo di ${euros(p.price)} è stato trasferito al venditore.`)
+        .addFields({ name: "Nuovo Saldo Corrente", value: euros(res.buyerBalance) })
+        .setTimestamp()] });
+    } catch (e) {
+      if (e.message === "BUYER_ACCOUNT_MISSING") return interaction.editReply({ content: "❌ Errore: Non possiedi un conto bancario attivo. Usa **/apriconto**." });
+      if (e.message === "SELLER_ACCOUNT_MISSING") return interaction.editReply({ content: "❌ Transazione interrotta: Il venditore non possiede un conto corrente d'appoggio valido." });
+      if (e.message === "INSUFFICIENT_FUNDS") return interaction.editReply({ content: `❌ Transazione respinta: Fondi insufficienti per coprire la spesa di ${euros(p.price)}.` });
+      console.error(e);
+      return interaction.editReply({ content: "❌ Si è verificato un errore interno durante l'elaborazione del checkout finanziario." });
     }
   }
 });
