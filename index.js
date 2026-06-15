@@ -12,6 +12,7 @@ const token = process.env.DISCORD_BOT_TOKEN;
 const dbUrl = process.env.DATABASE_URL;
 const STAFF_ROLE_ID = "1504115375577497600";
 const CONTACT_USER_ID = "1141049314433573044";
+const POSTINO_ROLE_ID = "1515749955242037460";
 const DEFAULT_ROLE_SALARIES = {
   "1514961491433099386": 150,
   "1514960724626116721": 100,
@@ -90,6 +91,12 @@ function decryptPin(pinEnc) {
   let dec = decipher.update(enc, "hex", "utf8");
   dec += decipher.final("utf8");
   return dec;
+}
+function parsePrice(priceStr) {
+  if (typeof priceStr === "number") return Math.round(priceStr * 100);
+  const normalized = String(priceStr).replace(",", ".");
+  const parsed = parseFloat(normalized);
+  return Math.round(parsed * 100);
 }
 async function setupDb() {
   await query(`CREATE TABLE IF NOT EXISTS bank_accounts (
@@ -226,7 +233,13 @@ async function completeOnlinePurchase({ buyerId, sellerId, guildId, amount, prod
     client.release();
   }
 }
-function euros(n) { return `**${Number(n).toLocaleString("it-IT")} €**`; }
+function euros(n) { 
+  const centesimi = Number(n);
+  const euro = Math.floor(centesimi / 100);
+  const cent = centesimi % 100;
+  if (cent === 0) return `**${euro.toLocaleString("it-IT")} €**`;
+  return `**${euro},${String(cent).padStart(2, "0")} €**`;
+}
 function err(msg) { return new EmbedBuilder().setColor(0xe74c3c).setTitle("❌ Errore").setDescription(msg); }
 function calcolaStipendio(member, salaries) {
   let totale = 0;
@@ -303,26 +316,32 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   const canvas = createCanvas(860, 540);
   const ctx = canvas.getContext("2d");
   if ("textDrawingMode" in ctx) ctx.textDrawingMode = "glyph";
+  
+  // BACKGROUND LUMINOSO
   const bg = ctx.createLinearGradient(0, 0, 860, 540);
-  bg.addColorStop(0, "#101832");
-  bg.addColorStop(0.42, "#261348");
-  bg.addColorStop(1, "#07131d");
+  bg.addColorStop(0, "#0f1e2e");
+  bg.addColorStop(0.5, "#1a3a42");
+  bg.addColorStop(1, "#0f1e2e");
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, 860, 540);
 
+  // Glow superiore
   const glowA = ctx.createRadialGradient(690, 110, 20, 690, 110, 310);
-  glowA.addColorStop(0, "rgba(255, 214, 112, 0.34)");
+  glowA.addColorStop(0, "rgba(255, 214, 112, 0.5)");
   glowA.addColorStop(1, "rgba(255, 214, 112, 0)");
   ctx.fillStyle = glowA;
   ctx.fillRect(0, 0, 860, 540);
+  
+  // Glow inferiore
   const glowB = ctx.createRadialGradient(170, 430, 20, 170, 430, 290);
-  glowB.addColorStop(0, "rgba(106, 225, 255, 0.22)");
+  glowB.addColorStop(0, "rgba(106, 225, 255, 0.4)");
   glowB.addColorStop(1, "rgba(106, 225, 255, 0)");
   ctx.fillStyle = glowB;
   ctx.fillRect(0, 0, 860, 540);
 
+  // Decorazioni
   ctx.save();
-  ctx.globalAlpha = 0.12;
+  ctx.globalAlpha = 0.15;
   for (let i = 0; i < 12; i++) {
     ctx.beginPath();
     ctx.arc(72 + i * 78, 52 + (i % 3) * 164, 58 + (i % 2) * 26, 0, Math.PI * 2);
@@ -332,50 +351,56 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   }
   ctx.restore();
 
+  // Border principale
   roundRect(ctx, 24, 24, 812, 492, 34);
   const glass = ctx.createLinearGradient(24, 24, 836, 516);
-  glass.addColorStop(0, "rgba(255,255,255,0.18)");
-  glass.addColorStop(0.52, "rgba(255,255,255,0.06)");
-  glass.addColorStop(1, "rgba(0,0,0,0.30)");
+  glass.addColorStop(0, "rgba(255,255,255,0.25)");
+  glass.addColorStop(0.52, "rgba(255,255,255,0.1)");
+  glass.addColorStop(1, "rgba(0,0,0,0.4)");
   ctx.fillStyle = glass;
   ctx.fill();
-  ctx.strokeStyle = "rgba(255, 219, 126, 0.95)";
+  ctx.strokeStyle = "rgba(255, 219, 126, 1)";
   ctx.lineWidth = 3;
   ctx.stroke();
 
+  // Card info box
   roundRect(ctx, 46, 54, 492, 366, 28);
-  ctx.fillStyle = "rgba(3, 9, 20, 0.46)";
+  ctx.fillStyle = "rgba(20, 40, 60, 0.7)";
   ctx.fill();
-  ctx.strokeStyle = "rgba(255,255,255,0.14)";
+  ctx.strokeStyle = "rgba(255,255,255,0.2)";
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
+  // Titolo
   const accent = ctx.createLinearGradient(52, 48, 450, 92);
-  accent.addColorStop(0, "#fff1a8");
-  accent.addColorStop(0.5, "#f4c15d");
+  accent.addColorStop(0, "#ffd46a");
+  accent.addColorStop(0.5, "#ffc94d");
   accent.addColorStop(1, "#7ff3ff");
   setCardFont(ctx, 24, { bold: true });
-  drawCardText(ctx, "CHICAGO CITY RP", 58, 82, { color: accent, stroke: "rgba(0,0,0,0.54)", lineWidth: 4 });
+  drawCardText(ctx, "CHICAGO CITY RP", 58, 82, { color: accent, stroke: "rgba(0,0,0,0.7)", lineWidth: 4 });
+  
   setCardFont(ctx, 14);
   drawCardText(ctx, isPublic ? "CARTA IDENTITÀ · PUBBLICA" : "CARTA IDENTITÀ · COMPLETA", 58, 112, {
-    color: "rgba(255, 238, 185, 0.95)",
-    stroke: "rgba(0,0,0,0.62)",
+    color: "rgba(255, 238, 185, 1)",
+    stroke: "rgba(0,0,0,0.7)",
     lineWidth: 3,
   });
 
+  // Status badge
   roundRect(ctx, 620, 66, 154, 42, 16);
-  ctx.fillStyle = isPublic ? "rgba(126, 243, 255, 0.16)" : "rgba(255, 199, 89, 0.17)";
+  ctx.fillStyle = isPublic ? "rgba(126, 243, 255, 0.2)" : "rgba(255, 199, 89, 0.25)";
   ctx.fill();
-  ctx.strokeStyle = isPublic ? "rgba(126,243,255,0.65)" : "rgba(255,199,89,0.66)";
+  ctx.strokeStyle = isPublic ? "rgba(126,243,255,0.8)" : "rgba(255,199,89,0.9)";
   ctx.lineWidth = 1;
   ctx.stroke();
   setCardFont(ctx, 13, { bold: true });
   drawCardText(ctx, isPublic ? "PUBLIC VIEW" : "OWNER ONLY", 642, 93, {
-    color: isPublic ? "#aef8ff" : "#ffe3a0",
-    stroke: "rgba(0,0,0,0.55)",
-    lineWidth: 2,
+    color: isPublic ? "#7ff3ff" : "#ffdb7d",
+    stroke: "rgba(0,0,0,0.65)",
+    lineWidth = 2,
   });
 
+  // Avatar
   const avatarUrl = user.displayAvatarURL({ extension: "png", size: 256 });
   const avatarImage = await loadImage(avatarUrl);
   const avatarX = 682;
@@ -397,7 +422,7 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   ctx.restore();
 
   ctx.save();
-  ctx.globalAlpha = 0.28;
+  ctx.globalAlpha = 0.35;
   ctx.beginPath();
   ctx.ellipse(682, 286, 132, 48, -0.46, 0, Math.PI * 2);
   ctx.strokeStyle = "#7ff3ff";
@@ -405,83 +430,94 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   ctx.stroke();
   ctx.restore();
 
+  // Nome
   const safeNome = String(nome ?? "").toUpperCase();
   const safeCognome = String(cognome ?? "").toUpperCase();
   setCardFont(ctx, 46, { bold: true });
-  drawCardText(ctx, fitText(ctx, safeNome, 430), 58, 186, { color: "#ffffff", stroke: "rgba(0,0,0,0.72)", lineWidth: 5 });
+  drawCardText(ctx, fitText(ctx, safeNome, 430), 58, 186, { color: "#ffffff", stroke: "rgba(0,0,0,0.8)", lineWidth: 5 });
+  
+  // Cognome o nascosto
   if (!isPublic && safeCognome) {
     setCardFont(ctx, 34, { bold: true });
-    drawCardText(ctx, fitText(ctx, safeCognome, 420), 58, 236, { color: "#ffe08b", stroke: "rgba(0,0,0,0.70)", lineWidth: 4 });
+    drawCardText(ctx, fitText(ctx, safeCognome, 420), 58, 236, { color: "#ffe08b", stroke: "rgba(0,0,0,0.75)", lineWidth: 4 });
   } else {
     roundRect(ctx, 58, 211, 282, 36, 14);
-    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
     ctx.fill();
     setCardFont(ctx, 14, { bold: true });
     drawCardText(ctx, "COGNOME NASCOSTO", 76, 235, {
-      color: "rgba(255,255,255,0.82)",
-      stroke: "rgba(0,0,0,0.55)",
+      color: "rgba(255,255,255,0.88)",
+      stroke: "rgba(0,0,0,0.65)",
       lineWidth: 2,
     });
   }
+  
+  // Data creazione
   const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT", { day: "2-digit", month: "long", year: "numeric" });
   setCardFont(ctx, 15, { bold: true });
   drawCardText(ctx, `MEMBRO DAL ${dataCreazione.toUpperCase()}`, 58, 292, {
-    color: "rgba(255,255,255,0.92)",
-    stroke: "rgba(0,0,0,0.66)",
+    color: "rgba(255,255,255,0.95)",
+    stroke: "rgba(0,0,0,0.73)",
     lineWidth: 3,
   });
+  
+  // Username
   setCardFont(ctx, 17, { bold: true });
   drawCardText(ctx, fitText(ctx, `@${user.username}`, 330), 58, 326, {
     color: "#7ff3ff",
-    stroke: "rgba(0,0,0,0.66)",
+    stroke: "rgba(0,0,0,0.73)",
     lineWidth: 3,
   });
 
-  drawSoftLine(ctx, 58, 354, 492, 354, "rgba(255,255,255,0.20)");
+  drawSoftLine(ctx, 58, 354, 492, 354, "rgba(255,255,255,0.25)");
+  
+  // PIN o nascosto
   if (!isPublic && pin) {
     roundRect(ctx, 58, 374, 250, 58, 16);
-    ctx.fillStyle = "rgba(255, 210, 106, 0.16)";
+    ctx.fillStyle = "rgba(255, 210, 106, 0.2)";
     ctx.fill();
-    ctx.strokeStyle = "rgba(255, 219, 126, 0.82)";
+    ctx.strokeStyle = "rgba(255, 219, 126, 0.9)";
     ctx.lineWidth = 1.2;
     ctx.stroke();
     setCardFont(ctx, 23, { bold: true });
-    drawCardText(ctx, `PIN · ${pin}`, 78, 411, { color: "#ffffff", stroke: "rgba(0,0,0,0.68)", lineWidth: 4 });
+    drawCardText(ctx, `PIN · ${pin}`, 78, 411, { color: "#ffffff", stroke: "rgba(0,0,0,0.73)", lineWidth: 4 });
   } else if (isPublic) {
     roundRect(ctx, 58, 374, 298, 58, 16);
-    ctx.fillStyle = "rgba(126, 243, 255, 0.12)";
+    ctx.fillStyle = "rgba(126, 243, 255, 0.16)";
     ctx.fill();
-    ctx.strokeStyle = "rgba(126, 243, 255, 0.45)";
+    ctx.strokeStyle = "rgba(126, 243, 255, 0.6)";
     ctx.lineWidth = 1.2;
     ctx.stroke();
     setCardFont(ctx, 15, { bold: true });
     drawCardText(ctx, "PIN E DATI SENSIBILI NASCOSTI", 76, 410, {
-      color: "rgba(226,251,255,0.92)",
-      stroke: "rgba(0,0,0,0.60)",
+      color: "rgba(200, 250, 255, 0.95)",
+      stroke: "rgba(0,0,0,0.68)",
       lineWidth: 2.5,
     });
   }
 
+  // Footer box
   roundRect(ctx, 584, 404, 194, 48, 14);
-  ctx.fillStyle = "rgba(255,255,255,0.08)";
+  ctx.fillStyle = "rgba(255,255,255,0.12)";
   ctx.fill();
   setCardFont(ctx, 13, { bold: true });
   drawCardText(ctx, isPublic ? "SAFE PUBLIC CARD" : "PRIVATE OWNER CARD", 606, 434, {
-    color: "rgba(255,255,255,0.82)",
-    stroke: "rgba(0,0,0,0.55)",
+    color: "rgba(255,255,255,0.88)",
+    stroke: "rgba(0,0,0,0.65)",
     lineWidth: 2,
   });
 
   setCardFont(ctx, 16, { bold: true });
   drawCardText(ctx, "Chicago City Rp Card", 58, 486, {
-    color: "rgba(255, 225, 142, 0.96)",
-    stroke: "rgba(0,0,0,0.66)",
+    color: "rgba(255, 225, 142, 0.98)",
+    stroke: "rgba(0,0,0,0.73)",
     lineWidth: 3,
   });
+  
   setCardFont(ctx, 12, { bold: true });
-  drawCardText(ctx, isPublic ? "Premi “Vedi tutto” solo se questa carta è tua" : "Documento riservato — non condividere", 58, 510, {
-    color: "rgba(255,255,255,0.72)",
-    stroke: "rgba(0,0,0,0.64)",
+  drawCardText(ctx, isPublic ? "Premi "Vedi tutto" solo se questa carta è tua" : "Documento riservato — non condividere", 58, 510, {
+    color: "rgba(255,255,255,0.78)",
+    stroke: "rgba(0,0,0,0.70)",
     lineWidth: 2,
   });
   return canvas.toBuffer("image/png");
@@ -520,7 +556,7 @@ async function pagareStipendiGuild(client) {
         const u = await client.users.fetch(acc.user_id);
         await u.send({ embeds: [new EmbedBuilder().setColor(0xe67e22)
           .setTitle("⚠️ Nessuno Stipendio Questo Mese")
-          .setDescription(`Non hai nessun ruolo lavorativo assegnato, quindi non puoi ricevere lo stipendio mensile.\n\n> Contatta <@${CONTACT_USER_ID}> per farti assegnare un ruolo e iniziare a guadagnare!`)
+          .setDescription(`Non hai nessun ruolo lavorativo assegnato, quindi non puoi ricevere lo stipendio mensile.\n\n> Contatta <@${CONTACT_USER_ID}> per farti assegnare un ruolo e iniziare a [...]
           .setTimestamp()] });
       } catch {}
       console.log(`Nessun ruolo lavorativo per ${acc.user_id} (guild: ${acc.guild_id}) - avviso inviato`);
@@ -534,12 +570,12 @@ async function pagareStipendiGuild(client) {
       "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES(NULL,$1,$2,$3,'Stipendio mensile automatico','stipendio')",
       [acc.user_id, acc.guild_id, totale]
     );
-    const dettaglioRuoli = ruoli.map(r => `<@&${r.roleId}> → ${euros(r.importo)}`).join("\n");
+    const dettaglioRuoli = ruoli.map(r => `<@&${r.roleId}> → ${euros(r.importo * 100)}`).join("\n");
     try {
       const u = await client.users.fetch(acc.user_id);
       await u.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
         .setTitle("💰 Stipendio Accreditato!")
-        .setDescription(`Il tuo stipendio mensile di ${euros(totale)} è stato accreditato sul tuo conto bancario! 🎉`)
+        .setDescription(`Il tuo stipendio mensile di ${euros(totale * 100)} è stato accreditato sul tuo conto bancario! 🎉`)
         .addFields({ name: "Dettaglio ruoli", value: dettaglioRuoli })
         .setTimestamp()] });
     } catch {}
@@ -598,7 +634,7 @@ const commands = [
     .setDescription("Crea un prodotto vendibile in un negozio online")
     .addStringOption(o => o.setName("negozio").setDescription("Negozio in cui mettere il prodotto").setRequired(true).addChoices(...SHOP_CATALOG))
     .addStringOption(o => o.setName("nome").setDescription("Nome del prodotto").setRequired(true).setMaxLength(80))
-    .addIntegerOption(o => o.setName("costo").setDescription("Prezzo del prodotto in euro").setRequired(true).setMinValue(1))
+    .addStringOption(o => o.setName("costo").setDescription("Prezzo in euro (es: 19.99 o 19,99)").setRequired(true))
     .addAttachmentOption(o => o.setName("immagine").setDescription("Foto del prodotto").setRequired(true)),
   new SlashCommandBuilder()
     .setName("eliminaprodotto")
@@ -631,10 +667,10 @@ function buildPublicCardReply(user, imgBuffer) {
   return {
     content: "",
     embeds: [new EmbedBuilder().setColor(0xD4AF37)
-      .setTitle("💳 Chicago City Rp Card")
-      .setDescription(`Carta identità pubblica di ${user}.\n*Versione pubblica — cognome e PIN nascosti.*`)
+      .setTitle("💳 Chicago City Rp Card - Versione Pubblica")
+      .setDescription(`Carta identità di ${user}.\n*Cognome e PIN nascosti. Clicca il pulsante sotto se sei il proprietario per vedere tutto.*`)
       .setImage("attachment://carta_pubblica.png")
-      .setFooter({ text: "Solo il proprietario può richiedere la carta completa via DM" })
+      .setFooter({ text: "Solo il proprietario può visualizzare la carta completa in privato" })
       .setTimestamp()],
     files: [attachment],
     components: [row],
@@ -650,12 +686,12 @@ async function handleCommand(interaction) {
       return interaction.editReply({ embeds: [err("Hai già un conto bancario aperto!")] });
     }
     await query(
-      "INSERT INTO bank_accounts(user_id, guild_id, balance) VALUES($1, $2, 500)",
+      "INSERT INTO bank_accounts(user_id, guild_id, balance) VALUES($1, $2, 50000)",
       [user.id, guildId]
     );
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("🏦 Conto Bancario Aperto!")
-      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile!`)
+      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio.`)
       .setTimestamp()] });
   }
   if (commandName === "creapin") {
@@ -695,28 +731,29 @@ async function handleCommand(interaction) {
     if (!mittente) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
     if (!mittente.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
     if (hashPin(pin) !== mittente.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Transazione annullata.")] });
-    if (mittente.balance < importo) return interaction.editReply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(mittente.balance)} sul conto.`)] });
+    if (mittente.balance < importo * 100) return interaction.editReply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(mittente.balance)} sul conto.`)] });
     const destinatario = await getAccount(target.id, guildId);
     if (!destinatario) return interaction.editReply({ embeds: [err(`${target.displayName} non ha un conto bancario.`)] });
-    await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [importo, user.id, guildId]);
-    await query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [importo, target.id, guildId]);
+    const amountInCents = importo * 100;
+    await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [amountInCents, user.id, guildId]);
+    await query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [amountInCents, target.id, guildId]);
     await query(
       "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'pagamento')",
-      [user.id, target.id, guildId, importo, motivo]
+      [user.id, target.id, guildId, amountInCents, motivo]
     );
     try {
       await target.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
         .setTitle("💸 Hai Ricevuto un Pagamento!")
-        .setDescription(`${user.tag} ti ha inviato ${euros(importo)}`)
+        .setDescription(`${user.tag} ti ha inviato ${euros(amountInCents)}`)
         .addFields({ name: "Motivo", value: motivo })
         .setTimestamp()] });
     } catch {}
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("✅ Pagamento Effettuato!")
-      .setDescription(`Hai inviato ${euros(importo)} a ${target}`)
+      .setDescription(`Hai inviato ${euros(amountInCents)} a ${target}`)
       .addFields(
         { name: "Motivo", value: motivo },
-        { name: "Tuo saldo rimanente", value: euros(mittente.balance - importo) }
+        { name: "Tuo saldo rimanente", value: euros(mittente.balance - amountInCents) }
       ).setTimestamp()] });
   }
   if (commandName === "sequestra") {
@@ -729,7 +766,7 @@ async function handleCommand(interaction) {
     const motivo = interaction.options.getString("motivo") ?? "Nessun motivo specificato";
     const vittima = await getAccount(target.id, guildId);
     if (!vittima) return interaction.editReply({ embeds: [err(`${target.displayName} non ha un conto bancario.`)] });
-    const sequestrabile = Math.min(importo, vittima.balance);
+    const sequestrabile = Math.min(importo * 100, vittima.balance);
     if (sequestrabile <= 0) return interaction.editReply({ embeds: [err(`${target.displayName} non ha fondi sul conto.`)] });
     await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [sequestrabile, target.id, guildId]);
     await query(
@@ -797,12 +834,12 @@ async function handleCommand(interaction) {
     await query(
       `INSERT INTO role_salaries(guild_id, role_id, amount) VALUES($1,$2,$3)
        ON CONFLICT (guild_id, role_id) DO UPDATE SET amount=EXCLUDED.amount, updated_at=NOW()`,
-      [guildId, ruolo.id, importo]
+      [guildId, ruolo.id, importo * 100]
     );
     await loadSalaries(guildId);
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("💼 Stipendio Impostato")
-      .setDescription(`Lo stipendio mensile del ruolo ${ruolo} è ora ${euros(importo)}.`)
+      .setDescription(`Lo stipendio mensile del ruolo ${ruolo} è ora ${euros(importo * 100)}.`)
       .setFooter({ text: "La modifica avrà effetto dal prossimo pagamento (1° del mese)." })
       .setTimestamp()] });
   }
@@ -845,7 +882,7 @@ async function handleCommand(interaction) {
     const dettaglioRuoli = ruoli.map(r => `<@&${r.roleId}> → ${euros(r.importo)}`).join("\n");
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x3498db)
       .setTitle("💰 Il Tuo Stipendio Mensile")
-      .setDescription(`Ogni 1° del mese riceverai un totale di ${euros(totale)}`)
+      .setDescription(`Ogni 1° del mese riceverai un totale di ${euros(totale)}.`)
       .addFields({ name: "Dettaglio ruoli", value: dettaglioRuoli })
       .setFooter({ text: "Lo stipendio viene accreditato automaticamente il 1° di ogni mese." })
       .setTimestamp()] });
@@ -897,7 +934,8 @@ async function handleCommand(interaction) {
   if (commandName === "creaprodotto") {
     const shopKey = interaction.options.getString("negozio", true);
     const nome = interaction.options.getString("nome", true).trim();
-    const costo = interaction.options.getInteger("costo", true);
+    const costoStr = interaction.options.getString("costo", true);
+    const costo = parsePrice(costoStr);
     const immagine = interaction.options.getAttachment("immagine", true);
     const acc = await getAccount(user.id, guildId);
     if (!acc) return interaction.editReply({ embeds: [err("Devi avere un conto bancario per vendere prodotti. Usa prima **/apriconto**.")] });
@@ -942,8 +980,8 @@ async function handleCommand(interaction) {
     const embed = new EmbedBuilder()
       .setColor(0x2ecc71)
       .setTitle("📦 Acquisti Online Brookhaven")
-      .setDescription("Premi **Ordina online**, scegli il negozio, seleziona il prodotto e conferma il pagamento con il tuo PIN.")
-      .setFooter({ text: "Il pagamento arriva subito al venditore nel conto del server." })
+      .setDescription("Premi **Ordina online**, scegli il negozio, seleziona il prodotto e conferma il pagamento con il tuo PIN e il nome Roblox.")
+      .setFooter({ text: "Il pagamento arriva subito al venditore nel conto del server. Il postino consegnerà al prossimo RP!" })
       .setTimestamp();
     if (immagine) embed.setImage(immagine.url);
     return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(orderButton)] });
@@ -997,19 +1035,20 @@ async function handleFullCardButton(interaction) {
     });
   }
   try {
-    const user = await interaction.client.users.fetch(interaction.user.id);
-    const imgBuffer = await generateCardImage(user, card.nome, card.cognome, card.created_at, { isPublic: false, pin });
+    const userFetch = await interaction.client.users.fetch(interaction.user.id);
+    const imgBuffer = await generateCardImage(userFetch, card.nome, card.cognome, card.created_at, { isPublic: false, pin });
     const attachment = new AttachmentBuilder(imgBuffer, { name: "carta_completa.png" });
     await interaction.user.send({
       embeds: [new EmbedBuilder().setColor(0xD4AF37)
-        .setTitle("🔐 Carta Completa — Solo per te")
-        .setDescription("Ecco la tua **Chicago City Rp Card** con tutti i dati.\n**Non condividere questo messaggio.**")
+        .setTitle("🔐 Carta Completa - SOLO PER TE")
+        .setDescription("Ecco la tua **Chicago City Rp Card** con TUTTI i dati:\n- Nome ✓\n- Cognome ✓\n- PIN ✓\n\n**Non condividere questo messaggio con nessuno!**")
         .setImage("attachment://carta_completa.png")
+        .setFooter({ text: "Documento riservato" })
         .setTimestamp()],
       files: [attachment],
     });
     return interaction.editReply({
-      content: "✅ Carta completa inviata nei tuoi **messaggi privati (DM)**!",
+      content: "✅ Carta completa inviata nei tuoi **messaggi privati (DM)**! Controlla i tuoi DM 📬",
     });
   } catch (error) {
     console.error("Errore invio carta completa:", error);
@@ -1052,7 +1091,7 @@ async function handleOnlineShopSelect(interaction) {
   const productOptions = products.map(product => ({
     label: shorten(product.name, 90),
     value: String(product.id),
-    description: shorten(`${Number(product.price).toLocaleString("it-IT")} € · ID #${product.id}`, 100),
+    description: shorten(`${euros(product.price)} · ID #${product.id}`, 100),
   }));
   const menu = new StringSelectMenuBuilder()
     .setCustomId("online_product_select")
@@ -1083,14 +1122,14 @@ async function handleOnlineProductSelect(interaction) {
     content: "",
     embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle(`📦 ${product.name}`)
-      .setDescription("Conferma l'ordine inserendo il PIN del tuo conto bancario.")
+      .setDescription("Conferma l'ordine inserendo il PIN del tuo conto bancario e il tuo nome Roblox.\n\n**⚠️ Importante: Sii presente al prossimo RP per ricevere il pacco dal postino!**")
       .addFields(
         { name: "Negozio", value: getShopName(product.shop_key), inline: true },
         { name: "Prezzo", value: euros(product.price), inline: true },
         { name: "Venditore", value: `<@${product.creator_user_id}>`, inline: true }
       )
       .setImage(product.image_url)
-      .setFooter({ text: "Il pacco viene confermato solo dopo il pagamento." })
+      .setFooter({ text: "Il pacco viene confermato dopo il pagamento - Consegna al prossimo RP" })
       .setTimestamp()],
     components: [new ActionRowBuilder().addComponents(buyButton)],
   });
@@ -1108,22 +1147,34 @@ async function handleOnlineBuyButton(interaction) {
 
   const modal = new ModalBuilder()
     .setCustomId(`online_pin_${product.id}`)
-    .setTitle("Pagamento online");
+    .setTitle("Pagamento Online");
   const pinInput = new TextInputBuilder()
     .setCustomId("pin")
-    .setLabel("Inserisci il PIN del conto")
+    .setLabel("Inserisci il PIN del conto (4 cifre)")
     .setPlaceholder("1234")
     .setMinLength(4)
     .setMaxLength(4)
     .setRequired(true)
     .setStyle(TextInputStyle.Short);
-  modal.addComponents(new ActionRowBuilder().addComponents(pinInput));
+  const robloxInput = new TextInputBuilder()
+    .setCustomId("roblox_name")
+    .setLabel("Inserisci il tuo NOME ROBLOX")
+    .setPlaceholder("Il tuo username Roblox esatto")
+    .setMinLength(3)
+    .setMaxLength(20)
+    .setRequired(true)
+    .setStyle(TextInputStyle.Short);
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(pinInput),
+    new ActionRowBuilder().addComponents(robloxInput)
+  );
   return interaction.showModal(modal);
 }
 async function handleOnlinePinModal(interaction) {
   await interaction.deferReply({ ephemeral: true });
   const productId = Number(interaction.customId.replace("online_pin_", ""));
   const pin = interaction.fields.getTextInputValue("pin").trim();
+  const robloxName = interaction.fields.getTextInputValue("roblox_name").trim();
   if (!/^\d{4}$/.test(pin)) {
     return interaction.editReply({ embeds: [err("Il PIN deve essere composto da 4 cifre.")] });
   }
@@ -1160,15 +1211,42 @@ async function handleOnlinePinModal(interaction) {
         .setImage(product.image_url)
         .setTimestamp()] }).catch(() => {});
     }
+    const guild = interaction.guild || await interaction.client.guilds.fetch(interaction.guildId).catch(() => null);
+    if (guild) {
+      try {
+        const postinoRole = guild.roles.cache.get(POSTINO_ROLE_ID);
+        if (postinoRole) {
+          await postinoRole.send({ embeds: [new EmbedBuilder().setColor(0x3498db)
+            .setTitle("📦 NUOVO ORDINE ONLINE")
+            .setDescription(`Un nuovo ordine è in attesa di consegna!`)
+            .addFields(
+              { name: "📌 Prodotto", value: `${product.name} (ID: #${product.id})`, inline: false },
+              { name: "👤 Acquirente Discord", value: `${interaction.user} (@${interaction.user.username})`, inline: false },
+              { name: "🎮 Nome Roblox", value: `**${robloxName}**`, inline: false },
+              { name: "💰 Prezzo", value: euros(price), inline: true },
+              { name: "🏪 Negozio", value: getShopName(product.shop_key), inline: true }
+            )
+            .addFields(
+              { name: "⚠️ IMPORTANTE", value: `L'acquirente sarà presente al **PROSSIMO RP** per ricevere il pacco!` }
+            )
+            .setImage(product.image_url)
+            .setFooter({ text: "Consegna confermata in chat una volta completata." })
+            .setTimestamp()] }).catch(() => {});
+        }
+      } catch (e) {
+        console.error("Errore invio DM postino:", e);
+      }
+    }
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("✅ Ordine Confermato")
-      .setDescription(`Hai ordinato **${product.name}**. Il pacco è stato confermato dopo il pagamento.`)
+      .setTitle("✅ ORDINE CONFERMATO!")
+      .setDescription(`Hai ordinato con successo **${product.name}**!\n\n📦 Il postino te lo consegnerà al **prossimo RP**`)
       .addFields(
-        { name: "Negozio", value: getShopName(product.shop_key), inline: true },
-        { name: "Pagato", value: euros(price), inline: true },
-        { name: "Saldo rimanente", value: euros(result.buyerBalance), inline: true }
+        { name: "🎮 Nome Roblox", value: robloxName, inline: true },
+        { name: "💸 Pagato", value: euros(price), inline: true },
+        { name: "💶 Saldo rimanente", value: euros(result.buyerBalance), inline: true }
       )
       .setImage(product.image_url)
+      .setFooter({ text: "✅ Non dimenticare di presentarti al prossimo RP!" })
       .setTimestamp()] });
   } catch (error) {
     if (error.message === "INSUFFICIENT_FUNDS") return interaction.editReply({ embeds: [err("Saldo insufficiente per comprare questo prodotto.")] });
@@ -1178,7 +1256,7 @@ async function handleOnlinePinModal(interaction) {
     return interaction.editReply({ embeds: [err("Errore durante l'acquisto online. Riprova più tardi.")] });
   }
 }
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.DirectMessages] });
 client.once("ready", async (rc) => {
   console.log(`Bot online: ${rc.user.tag}`);
   await setupDb();
