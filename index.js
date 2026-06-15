@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, StringSelectMenuBuilder, ModalBuilder, TextInput[...]
 const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
@@ -397,7 +397,7 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   drawCardText(ctx, isPublic ? "PUBLIC VIEW" : "OWNER ONLY", 642, 93, {
     color: isPublic ? "#7ff3ff" : "#ffdb7d",
     stroke: "rgba(0,0,0,0.65)",
-    lineWidth = 2,
+    lineWidth: 2,
   });
 
   // Avatar
@@ -691,7 +691,7 @@ async function handleCommand(interaction) {
     );
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("🏦 Conto Bancario Aperto!")
-      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio.`)
+      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere[...]
       .setTimestamp()] });
   }
   if (commandName === "creapin") {
