@@ -515,7 +515,7 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
   });
   
   setCardFont(ctx, 12, { bold: true });
-  drawCardText(ctx, isPublic ? "Premi "Vedi tutto" solo se questa carta è tua" : "Documento riservato — non condividere", 58, 510, {
+  drawCardText(ctx, isPublic ? "Premi \"Vedi tutto\" solo se questa carta è tua" : "Documento riservato — non condividere", 58, 510, {
     color: "rgba(255,255,255,0.78)",
     stroke: "rgba(0,0,0,0.70)",
     lineWidth: 2,
