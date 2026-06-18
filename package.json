@@ -6,8 +6,10 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.19.3",
-    "pg": "^8.13.3",
-    "canvas": "^2.11.2"
+    "canvas": "^2.11.2",
+    "discord": "^0.8.2",
+    "discord.js": "^14.26.4",
+    "dotenv": "^17.4.2",
+    "pg": "^8.13.3"
   }
 }

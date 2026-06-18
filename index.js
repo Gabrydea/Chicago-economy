@@ -4,6 +4,7 @@ const http = require("http");
 const crypto = require("crypto");
 const path = require("path");
 const { createCanvas, loadImage, registerFont } = require("canvas");
+require("dotenv").config();
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => { res.writeHead(200); res.end("Bot online!"); }).listen(PORT, () => {
   console.log(`Health check su porta ${PORT}`);
@@ -12,7 +13,8 @@ const token = process.env.DISCORD_BOT_TOKEN;
 const dbUrl = process.env.DATABASE_URL;
 const STAFF_ROLE_ID = "1504115375577497600";
 const CONTACT_USER_ID = "1141049314433573044";
-const POSTINO_ROLE_ID = "1515749955242037460";
+const POSTINO_ROLE_ID = process.env.POSTINO_ROLE_ID || "1515749955242037460";
+const INSTALLMENT_DUE_DAYS = 7;
 const DEFAULT_ROLE_SALARIES = {
   "1514961491433099386": 150,
   "1514960724626116721": 100,
@@ -93,10 +95,37 @@ function decryptPin(pinEnc) {
   return dec;
 }
 function parsePrice(priceStr) {
-  if (typeof priceStr === "number") return Math.round(priceStr * 100);
-  const normalized = String(priceStr).replace(",", ".");
+  if (typeof priceStr === "number") {
+    if (Number.isNaN(priceStr) || priceStr <= 0) return null;
+    return Math.round(priceStr * 100);
+  }
+  const normalized = String(priceStr).replace(",", ".").trim();
   const parsed = parseFloat(normalized);
+  if (Number.isNaN(parsed) || parsed <= 0) return null;
   return Math.round(parsed * 100);
+}
+function formatCardNumber(userId) {
+  const hash = crypto.createHash("md5").update(userId).digest("hex");
+  return `${hash.slice(0, 4).toUpperCase()} ${hash.slice(4, 8).toUpperCase()} ${hash.slice(8, 12).toUpperCase()} ${hash.slice(12, 16).toUpperCase()}`;
+}
+function formatCardExpiry(userId) {
+  const value = Number(userId.slice(-2)) || 24;
+  const month = ((value % 12) + 1).toString().padStart(2, "0");
+  const year = 24 + Math.floor(value / 12);
+  return `${month}/${String(year).slice(-2)}`;
+}
+async function sendDmToRoleMembers(guild, roleId, payload) {
+  const members = guild.members.cache.filter(member => member.roles.cache.has(roleId) && !member.user.bot);
+  let sent = 0;
+  for (const member of members.values()) {
+    try {
+      await member.send(payload);
+      sent += 1;
+    } catch {
+      // Ignora membri che non accettano DM
+    }
+  }
+  return sent;
 }
 async function setupDb() {
   await query(`CREATE TABLE IF NOT EXISTS bank_accounts (
@@ -149,6 +178,31 @@ async function setupDb() {
   )`);
   await query(`CREATE INDEX IF NOT EXISTS idx_products_guild_shop ON products(guild_id, shop_key)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_products_creator ON products(guild_id, creator_user_id)`);
+  await query(`CREATE TABLE IF NOT EXISTS cart_items (
+    id SERIAL PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    product_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, user_id, product_id)
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS installment_orders (
+    id SERIAL PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    buyer_user_id TEXT NOT NULL,
+    seller_user_id TEXT NOT NULL,
+    product_id INTEGER NOT NULL,
+    product_name TEXT NOT NULL,
+    total_amount BIGINT NOT NULL,
+    paid_amount BIGINT NOT NULL DEFAULT 0,
+    remaining_amount BIGINT NOT NULL DEFAULT 0,
+    installments_total INTEGER NOT NULL DEFAULT 1,
+    installments_paid INTEGER NOT NULL DEFAULT 0,
+    next_payment_due TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  )`);
   await query(`ALTER TABLE cards ADD COLUMN IF NOT EXISTS pin_enc TEXT`).catch(() => {});
   console.log("Database pronto.");
 }
@@ -232,6 +286,120 @@ async function completeOnlinePurchase({ buyerId, sellerId, guildId, amount, prod
   } finally {
     client.release();
   }
+}
+async function getCartItems(userId, guildId) {
+  const { rows } = await query(
+    `SELECT ci.id, ci.quantity, ci.product_id, p.name, p.price, p.image_url, p.creator_user_id, p.shop_key
+     FROM cart_items ci
+     JOIN products p ON p.id = ci.product_id AND p.guild_id = ci.guild_id
+     WHERE ci.guild_id = $1 AND ci.user_id = $2
+     ORDER BY ci.created_at DESC`,
+    [guildId, userId]
+  );
+  return rows;
+}
+async function completeCartPurchase({ buyerId, guildId, cartItems }) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const buyerRes = await client.query(
+      "SELECT * FROM bank_accounts WHERE user_id=$1 AND guild_id=$2 FOR UPDATE",
+      [buyerId, guildId]
+    );
+    const buyer = buyerRes.rows[0];
+    if (!buyer) throw new Error("BUYER_ACCOUNT_MISSING");
+    const totalAmount = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    if (Number(buyer.balance) < totalAmount) throw new Error("INSUFFICIENT_FUNDS");
+    await client.query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [totalAmount, buyerId, guildId]);
+
+    const sellerAmounts = new Map();
+    for (const item of cartItems) {
+      if (item.creator_user_id === buyerId) throw new Error("CANNOT_BUY_OWN_PRODUCT");
+      const current = sellerAmounts.get(item.creator_user_id) || 0;
+      sellerAmounts.set(item.creator_user_id, current + item.price * item.quantity);
+    }
+    for (const [sellerId, amount] of sellerAmounts.entries()) {
+      const sellerRes = await client.query(
+        "SELECT * FROM bank_accounts WHERE user_id=$1 AND guild_id=$2 FOR UPDATE",
+        [sellerId, guildId]
+      );
+      const seller = sellerRes.rows[0];
+      if (!seller) throw new Error("SELLER_ACCOUNT_MISSING");
+      await client.query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [amount, sellerId, guildId]);
+    }
+    for (const item of cartItems) {
+      await client.query(
+        "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'acquisto_online')",
+        [buyerId, item.creator_user_id, guildId, item.price * item.quantity, `Acquisto online ${item.name} x${item.quantity}`]
+      );
+    }
+    await client.query("COMMIT");
+    return totalAmount;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+async function addCartItem(userId, guildId, productId) {
+  await query(
+    `INSERT INTO cart_items(guild_id, user_id, product_id, quantity)
+     VALUES($1, $2, $3, 1)
+     ON CONFLICT (guild_id, user_id, product_id) DO UPDATE SET quantity = cart_items.quantity + 1`,
+    [guildId, userId, productId]
+  );
+}
+async function removeCartItem(itemId, userId, guildId) {
+  await query("DELETE FROM cart_items WHERE id=$1 AND user_id=$2 AND guild_id=$3", [itemId, userId, guildId]);
+}
+async function clearCart(userId, guildId) {
+  await query("DELETE FROM cart_items WHERE user_id=$1 AND guild_id=$2", [userId, guildId]);
+}
+function buildCartEmbed(cartItems) {
+  if (!cartItems.length) {
+    return new EmbedBuilder().setColor(0x3498db)
+      .setTitle("🧺 Il tuo carrello è vuoto")
+      .setDescription("Aggiungi prodotti dal negozio online e poi usa il pulsante per vedere il carrello.")
+      .setTimestamp();
+  }
+  const totale = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const lines = cartItems.map((item, index) => {
+    const prezzoSingolo = euros(item.price);
+    return `**${index + 1}.** ${item.name} x${item.quantity} · ${prezzoSingolo}`;
+  }).join("\n");
+  return new EmbedBuilder().setColor(0x3498db)
+    .setTitle("🧺 Il tuo carrello")
+    .setDescription(lines)
+    .addFields(
+      { name: "Totale", value: euros(totale), inline: true },
+      { name: "Note", value: "Usa le X per rimuovere un prodotto o Cancella tutto per svuotare il carrello.", inline: false }
+    )
+    .setFooter({ text: "Premi Compra tutto per procedere al pagamento." })
+    .setTimestamp();
+}
+function buildCartComponents(cartItems) {
+  const rows = [];
+  const buttons = cartItems.slice(0, 5).map(item => new ButtonBuilder()
+    .setCustomId(`cart_remove_${item.id}`)
+    .setLabel(`❌ ${item.name.slice(0, 16)}`)
+    .setStyle(ButtonStyle.Danger)
+  );
+  if (buttons.length) {
+    rows.push(new ActionRowBuilder().addComponents(buttons));
+  }
+  const bottom = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("cart_clear")
+      .setLabel("🗑️ Cancella tutto")
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId("cart_checkout")
+      .setLabel("✅ Compra tutto")
+      .setStyle(ButtonStyle.Success)
+  );
+  rows.push(bottom);
+  return rows;
 }
 function euros(n) { 
   const centesimi = Number(n);
@@ -471,6 +639,9 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
 
   drawSoftLine(ctx, 58, 354, 492, 354, "rgba(255,255,255,0.25)");
   
+  const cardNumber = isPublic ? "•••• •••• •••• ••••" : formatCardNumber(user.id);
+  const cardExpiry = isPublic ? "MM/AA" : formatCardExpiry(user.id);
+
   // PIN o nascosto
   if (!isPublic && pin) {
     roundRect(ctx, 58, 374, 250, 58, 16);
@@ -495,6 +666,18 @@ async function generateCardImage(user, nome, cognome, createdAt, { isPublic = tr
       lineWidth: 2.5,
     });
   }
+
+  // Numero carta
+  roundRect(ctx, 58, 444, 420, 64, 18);
+  ctx.fillStyle = "rgba(255,255,255,0.08)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.16)";
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  setCardFont(ctx, 22, { bold: true });
+  drawCardText(ctx, cardNumber, 78, 474, { color: "#ffffff", stroke: "rgba(0,0,0,0.7)", lineWidth: 3 });
+  setCardFont(ctx, 14, { bold: true });
+  drawCardText(ctx, `VALIDO FINO ${cardExpiry}`, 78, 498, { color: "rgba(255,255,255,0.85)", stroke: "rgba(0,0,0,0.65)", lineWidth: 2 });
 
   // Footer box
   roundRect(ctx, 584, 404, 194, 48, 14);
@@ -556,7 +739,7 @@ async function pagareStipendiGuild(client) {
         const u = await client.users.fetch(acc.user_id);
         await u.send({ embeds: [new EmbedBuilder().setColor(0xe67e22)
           .setTitle("⚠️ Nessuno Stipendio Questo Mese")
-          .setDescription(`Non hai nessun ruolo lavorativo assegnato, quindi non puoi ricevere lo stipendio mensile.\n\n> Contatta <@${CONTACT_USER_ID}> per farti assegnare un ruolo e iniziare a [...]
+          .setDescription(`Non hai nessun ruolo lavorativo assegnato, quindi non puoi ricevere lo stipendio mensile.\n\n> Contatta <@${CONTACT_USER_ID}> per farti assegnare un ruolo e iniziare a lavorare nel server.`)
           .setTimestamp()] });
       } catch {}
       console.log(`Nessun ruolo lavorativo per ${acc.user_id} (guild: ${acc.guild_id}) - avviso inviato`);
@@ -642,8 +825,11 @@ const commands = [
     .addIntegerOption(o => o.setName("id").setDescription("ID del prodotto da eliminare").setRequired(true).setMinValue(1)),
   new SlashCommandBuilder()
     .setName("compraonline")
-    .setDescription("Pubblica il pannello con il bottone Ordina online")
+    .setDescription("Pubblica il pannello del negozio online e gestisci il tuo carrello")
     .addAttachmentOption(o => o.setName("immagine").setDescription("Immagine/banner del negozio online").setRequired(false)),
+  new SlashCommandBuilder()
+    .setName("visualizzacarrello")
+    .setDescription("Visualizza il tuo carrello e procedi al checkout"),
   new SlashCommandBuilder()
     .setName("setstipendio")
     .setDescription("[SOLO STAFF] Imposta o modifica lo stipendio mensile di un ruolo")
@@ -656,6 +842,14 @@ const commands = [
   new SlashCommandBuilder()
     .setName("listastipendi")
     .setDescription("[SOLO STAFF] Mostra tutti gli stipendi per ruolo configurati"),
+  new SlashCommandBuilder()
+    .setName("ordini")
+    .setDescription("Mostra i tuoi ordini online e i pagamenti a rate"),
+  new SlashCommandBuilder()
+    .setName("pagorata")
+    .setDescription("Paga la prossima rata di un ordine a rate")
+    .addIntegerOption(o => o.setName("ordine_id").setDescription("ID dell'ordine a rate").setRequired(true))
+    .addIntegerOption(o => o.setName("pin").setDescription("Il PIN del conto (4 cifre)").setRequired(true).setMinValue(1000).setMaxValue(9999)),
 ];
 function buildPublicCardReply(user, imgBuffer) {
   const attachment = new AttachmentBuilder(imgBuffer, { name: "carta_pubblica.png" });
@@ -678,7 +872,7 @@ function buildPublicCardReply(user, imgBuffer) {
 }
 async function handleCommand(interaction) {
   const { commandName, user, guildId, member } = interaction;
-  const ephemeral = ["saldo", "paga", "stipendio", "creaprodotto", "eliminaprodotto", "setstipendio", "rimuovistipendio", "listastipendi"].includes(commandName);
+  const ephemeral = ["saldo", "paga", "stipendio", "creaprodotto", "eliminaprodotto", "setstipendio", "rimuovistipendio", "listastipendi", "ordini", "pagorata", "visualizzacarrello"].includes(commandName);
   await interaction.deferReply({ ephemeral });
   if (commandName === "apriconto") {
     const existing = await getAccount(user.id, guildId);
@@ -691,7 +885,7 @@ async function handleCommand(interaction) {
     );
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("🏦 Conto Bancario Aperto!")
-      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere[...]
+      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile il 1° del mese.`)
       .setTimestamp()] });
   }
   if (commandName === "creapin") {
@@ -870,6 +1064,77 @@ async function handleCommand(interaction) {
       .setFooter({ text: "Chi possiede più ruoli riceve la somma dei rispettivi stipendi." })
       .setTimestamp()] });
   }
+  if (commandName === "ordini") {
+    const { rows } = await query(
+      "SELECT id, product_name, total_amount, paid_amount, remaining_amount, installments_total, installments_paid, status, next_payment_due FROM installment_orders WHERE guild_id=$1 AND buyer_user_id=$2 ORDER BY created_at DESC LIMIT 10",
+      [guildId, user.id]
+    );
+    if (!rows.length) {
+      return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x3498db)
+        .setTitle("📦 I Tuoi Ordini")
+        .setDescription("Non hai ordini a rate in corso.")
+        .setTimestamp()] });
+    }
+    const lines = rows.map(order => {
+      const nextDue = order.next_payment_due ? new Date(order.next_payment_due).toLocaleDateString("it-IT") : "-";
+      return `#${order.id} · ${order.product_name} · ${order.status.toUpperCase()}\n` +
+        `Pagato: ${euros(order.paid_amount)} · Residuo: ${euros(order.remaining_amount)} · Rate: ${order.installments_paid}/${order.installments_total} · Prossima: ${nextDue}`;
+    }).join("\n\n");
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x3498db)
+      .setTitle("📦 I Tuoi Ordini a Rate")
+      .setDescription(lines)
+      .setFooter({ text: "Usa /pagorata per saldare la prossima rata." })
+      .setTimestamp()] });
+  }
+  if (commandName === "pagorata") {
+    const orderId = interaction.options.getInteger("ordine_id", true);
+    const pin = interaction.options.getInteger("pin", true);
+    const orderRes = await query(
+      "SELECT * FROM installment_orders WHERE id=$1 AND guild_id=$2 AND buyer_user_id=$3",
+      [orderId, guildId, user.id]
+    );
+    const order = orderRes.rows[0];
+    if (!order) return interaction.editReply({ embeds: [err("Ordine a rate non trovato. Controlla l'ID e riprova.")] });
+    if (order.status !== "active") return interaction.editReply({ embeds: [err("Questo ordine non richiede più pagamenti.")] });
+    const buyer = await getAccount(user.id, guildId);
+    if (!buyer) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
+    if (!buyer.pin_hash) return interaction.editReply({ embeds: [err("Non hai ancora un PIN. Usa **/creapin** prima di pagare una rata.")] });
+    if (hashPin(pin) !== buyer.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Pagamento annullato.")] });
+    const remainingInstallments = order.installments_total - order.installments_paid;
+    const nextAmount = remainingInstallments > 1
+      ? Math.ceil(order.remaining_amount / remainingInstallments)
+      : order.remaining_amount;
+    if (buyer.balance < nextAmount) return interaction.editReply({ embeds: [err("Saldo insufficiente per pagare la prossima rata.")] });
+    const seller = await getAccount(order.seller_user_id, guildId);
+    if (!seller) return interaction.editReply({ embeds: [err("Il venditore non ha un conto bancario valido.")] });
+    await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [nextAmount, user.id, guildId]);
+    await query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [nextAmount, order.seller_user_id, guildId]);
+    await query(
+      "UPDATE installment_orders SET paid_amount=paid_amount+$1, remaining_amount=remaining_amount-$1, installments_paid=installments_paid+1, next_payment_due=$2, status=$3 WHERE id=$4",
+      [nextAmount, remainingInstallments > 1 ? new Date(Date.now() + INSTALLMENT_DUE_DAYS * 24 * 60 * 60 * 1000) : null, remainingInstallments > 1 ? "active" : "paid", order.id]
+    );
+    await query(
+      "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'pagamento_rata')",
+      [user.id, order.seller_user_id, guildId, nextAmount, `Rata ordine #${order.id}: ${order.product_name}`]
+    );
+    try {
+      const sellerUser = await interaction.client.users.fetch(order.seller_user_id);
+      await sellerUser.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+        .setTitle("💸 Ricevuta una Rata")
+        .setDescription(`${user.tag} ha pagato la prossima rata per **${order.product_name}**.`)
+        .addFields(
+          { name: "Importo", value: euros(nextAmount), inline: true },
+          { name: "Ordine", value: `#${order.id}`, inline: true }
+        ).setTimestamp()] }).catch(() => {});
+    } catch {}
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle("✅ Rata Pagata")
+      .setDescription(`Hai pagato ${euros(nextAmount)} per l'ordine #${order.id}.`)
+      .addFields(
+        { name: "Prodotto", value: order.product_name, inline: true },
+        { name: "Prossime rate", value: remainingInstallments > 1 ? `${remainingInstallments - 1}` : "0", inline: true }
+      ).setTimestamp()] });
+  }
   if (commandName === "stipendio") {
     const salaries = await getSalaries(guildId);
     const { totale, ruoli } = calcolaStipendio(member, salaries);
@@ -973,18 +1238,30 @@ async function handleCommand(interaction) {
   if (commandName === "compraonline") {
     const immagine = interaction.options.getAttachment("immagine");
     if (immagine && !isImageAttachment(immagine)) return interaction.editReply({ embeds: [err("L'allegato deve essere un'immagine/banner.")] });
-    const orderButton = new ButtonBuilder()
-      .setCustomId("online_shop_open")
-      .setLabel("🛒 Ordina online")
-      .setStyle(ButtonStyle.Success);
+    const components = [new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("online_shop_open")
+        .setLabel("🛒 Apri negozio")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("cart_view")
+        .setLabel("🧺 Visualizza carrello")
+        .setStyle(ButtonStyle.Secondary)
+    )];
     const embed = new EmbedBuilder()
       .setColor(0x2ecc71)
       .setTitle("📦 Acquisti Online Brookhaven")
-      .setDescription("Premi **Ordina online**, scegli il negozio, seleziona il prodotto e conferma il pagamento con il tuo PIN e il nome Roblox.")
-      .setFooter({ text: "Il pagamento arriva subito al venditore nel conto del server. Il postino consegnerà al prossimo RP!" })
+      .setDescription("Scegli un negozio, aggiungi i prodotti al carrello e visualizza il tuo carrello quando vuoi. Al checkout inserisci il PIN e il nome Roblox.")
+      .setFooter({ text: "Il postino consegnerà al prossimo RP. Usa il carrello per gestire quantità e rimuovere prodotti." })
       .setTimestamp();
     if (immagine) embed.setImage(immagine.url);
-    return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(orderButton)] });
+    return interaction.editReply({ embeds: [embed], components });
+  }
+  if (commandName === "visualizzacarrello") {
+    const items = await getCartItems(user.id, guildId);
+    const embed = buildCartEmbed(items);
+    const components = items.length ? buildCartComponents(items) : [];
+    return interaction.editReply({ embeds: [embed], components });
   }
   if (commandName === "saldo") {
     const acc = await getAccount(user.id, guildId);
@@ -1114,6 +1391,10 @@ async function handleOnlineProductSelect(interaction) {
   if (!product) {
     return interaction.update({ embeds: [err("Prodotto non più disponibile.")], components: [] });
   }
+  const addButton = new ButtonBuilder()
+    .setCustomId(`cart_add_${product.id}`)
+    .setLabel("➕ Aggiungi al carrello")
+    .setStyle(ButtonStyle.Primary);
   const buyButton = new ButtonBuilder()
     .setCustomId(`online_buy_${product.id}`)
     .setLabel("🔐 Inserisci PIN e paga")
@@ -1131,7 +1412,7 @@ async function handleOnlineProductSelect(interaction) {
       .setImage(product.image_url)
       .setFooter({ text: "Il pacco viene confermato dopo il pagamento - Consegna al prossimo RP" })
       .setTimestamp()],
-    components: [new ActionRowBuilder().addComponents(buyButton)],
+    components: [new ActionRowBuilder().addComponents(addButton, buyButton)],
   });
 }
 async function handleOnlineBuyButton(interaction) {
@@ -1164,9 +1445,18 @@ async function handleOnlineBuyButton(interaction) {
     .setMaxLength(20)
     .setRequired(true)
     .setStyle(TextInputStyle.Short);
+  const installmentsInput = new TextInputBuilder()
+    .setCustomId("installments")
+    .setLabel("Rate (1 = tutto subito, 2-12 = a rate)")
+    .setPlaceholder("1")
+    .setMinLength(1)
+    .setMaxLength(2)
+    .setRequired(true)
+    .setStyle(TextInputStyle.Short);
   modal.addComponents(
     new ActionRowBuilder().addComponents(pinInput),
-    new ActionRowBuilder().addComponents(robloxInput)
+    new ActionRowBuilder().addComponents(robloxInput),
+    new ActionRowBuilder().addComponents(installmentsInput)
   );
   return interaction.showModal(modal);
 }
@@ -1175,8 +1465,13 @@ async function handleOnlinePinModal(interaction) {
   const productId = Number(interaction.customId.replace("online_pin_", ""));
   const pin = interaction.fields.getTextInputValue("pin").trim();
   const robloxName = interaction.fields.getTextInputValue("roblox_name").trim();
+  const installmentsValue = interaction.fields.getTextInputValue("installments").trim();
   if (!/^\d{4}$/.test(pin)) {
     return interaction.editReply({ embeds: [err("Il PIN deve essere composto da 4 cifre.")] });
+  }
+  const installments = Number(installmentsValue) || 1;
+  if (!Number.isInteger(installments) || installments < 1 || installments > 12) {
+    return interaction.editReply({ embeds: [err("Le rate devono essere un numero tra 1 e 12.")] });
   }
   const product = await getProduct(productId, interaction.guildId);
   if (!product) return interaction.editReply({ embeds: [err("Prodotto non più disponibile.")] });
@@ -1189,34 +1484,36 @@ async function handleOnlinePinModal(interaction) {
   if (hashPin(pin) !== buyer.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Pagamento annullato.")] });
 
   const price = Number(product.price);
+  const guild = interaction.guild || await interaction.client.guilds.fetch(interaction.guildId).catch(() => null);
+  const seller = await getAccount(product.creator_user_id, interaction.guildId);
+  if (!seller) return interaction.editReply({ embeds: [err("Il venditore non ha un conto bancario valido.")] });
+
   try {
-    const result = await completeOnlinePurchase({
-      buyerId: interaction.user.id,
-      sellerId: product.creator_user_id,
-      guildId: interaction.guildId,
-      amount: price,
-      productName: product.name,
-      productId: product.id,
-    });
-    const sellerUser = await interaction.client.users.fetch(product.creator_user_id).catch(() => null);
-    if (sellerUser) {
-      await sellerUser.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-        .setTitle("💸 Vendita Online Ricevuta")
-        .setDescription(`${interaction.user.tag} ha comprato **${product.name}** da **${getShopName(product.shop_key)}**.`)
-        .addFields(
-          { name: "Importo ricevuto", value: euros(price), inline: true },
-          { name: "Saldo nel server", value: euros(result.sellerBalance), inline: true }
-        )
-        .setFooter({ text: "I soldi sono stati accreditati nel tuo conto del server." })
-        .setImage(product.image_url)
-        .setTimestamp()] }).catch(() => {});
-    }
-    const guild = interaction.guild || await interaction.client.guilds.fetch(interaction.guildId).catch(() => null);
-    if (guild) {
-      try {
-        const postinoRole = guild.roles.cache.get(POSTINO_ROLE_ID);
-        if (postinoRole) {
-          await postinoRole.send({ embeds: [new EmbedBuilder().setColor(0x3498db)
+    if (installments === 1) {
+      const result = await completeOnlinePurchase({
+        buyerId: interaction.user.id,
+        sellerId: product.creator_user_id,
+        guildId: interaction.guildId,
+        amount: price,
+        productName: product.name,
+        productId: product.id,
+      });
+      const sellerUser = await interaction.client.users.fetch(product.creator_user_id).catch(() => null);
+      if (sellerUser) {
+        await sellerUser.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+          .setTitle("💸 Vendita Online Ricevuta")
+          .setDescription(`${interaction.user.tag} ha comprato **${product.name}** da **${getShopName(product.shop_key)}**.`)
+          .addFields(
+            { name: "Importo ricevuto", value: euros(price), inline: true },
+            { name: "Saldo nel server", value: euros(result.sellerBalance), inline: true }
+          )
+          .setFooter({ text: "I soldi sono stati accreditati nel tuo conto del server." })
+          .setImage(product.image_url)
+          .setTimestamp()] }).catch(() => {});
+      }
+      if (guild) {
+        await sendDmToRoleMembers(guild, POSTINO_ROLE_ID, {
+          embeds: [new EmbedBuilder().setColor(0x3498db)
             .setTitle("📦 NUOVO ORDINE ONLINE")
             .setDescription(`Un nuovo ordine è in attesa di consegna!`)
             .addFields(
@@ -1231,29 +1528,247 @@ async function handleOnlinePinModal(interaction) {
             )
             .setImage(product.image_url)
             .setFooter({ text: "Consegna confermata in chat una volta completata." })
-            .setTimestamp()] }).catch(() => {});
-        }
-      } catch (e) {
-        console.error("Errore invio DM postino:", e);
+            .setTimestamp()]
+        });
       }
+      return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+        .setTitle("✅ ORDINE CONFERMATO!")
+        .setDescription(`Hai ordinato con successo **${product.name}**!\n\n📦 Il postino te lo consegnerà al **prossimo RP**`)
+        .addFields(
+          { name: "🎮 Nome Roblox", value: robloxName, inline: true },
+          { name: "💸 Pagato", value: euros(price), inline: true },
+          { name: "💶 Saldo rimanente", value: euros(result.buyerBalance), inline: true }
+        )
+        .setImage(product.image_url)
+        .setFooter({ text: "✅ Non dimenticare di presentarti al prossimo RP!" })
+        .setTimestamp()] });
+    }
+
+    const firstPayment = Math.ceil(price / installments);
+    if (buyer.balance < firstPayment) return interaction.editReply({ embeds: [err("Saldo insufficiente per pagare la prima rata.")] });
+    await completeOnlinePurchase({
+      buyerId: interaction.user.id,
+      sellerId: product.creator_user_id,
+      guildId: interaction.guildId,
+      amount: firstPayment,
+      productName: `${product.name} (prima rata)`,
+      productId: product.id,
+    });
+    const remainingAmount = price - firstPayment;
+    const nextDue = remainingAmount > 0 ? new Date(Date.now() + INSTALLMENT_DUE_DAYS * 24 * 60 * 60 * 1000) : null;
+    const status = remainingAmount > 0 ? "active" : "paid";
+    await query(
+      `INSERT INTO installment_orders(
+        guild_id, buyer_user_id, seller_user_id, product_id, product_name,
+        total_amount, paid_amount, remaining_amount, installments_total,
+        installments_paid, next_payment_due, status
+      ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        interaction.guildId,
+        interaction.user.id,
+        product.creator_user_id,
+        product.id,
+        product.name,
+        price,
+        firstPayment,
+        remainingAmount,
+        installments,
+        1,
+        nextDue,
+        status,
+      ]
+    );
+    const sellerUser = await interaction.client.users.fetch(product.creator_user_id).catch(() => null);
+    if (sellerUser) {
+      await sellerUser.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+        .setTitle("💸 Prima Rata Pagata")
+        .setDescription(`${interaction.user.tag} ha pagato la prima rata di **${product.name}**.`)
+        .addFields(
+          { name: "Importo", value: euros(firstPayment), inline: true },
+          { name: "Ordine", value: `Rate totali ${installments}`, inline: true }
+        )
+        .setTimestamp()] }).catch(() => {});
+    }
+    if (guild) {
+      await sendDmToRoleMembers(guild, POSTINO_ROLE_ID, {
+        embeds: [new EmbedBuilder().setColor(0x3498db)
+          .setTitle("📦 NUOVO ORDINE ONLINE A RATE")
+          .setDescription(`Un nuovo ordine a rate è in attesa di consegna!`)
+          .addFields(
+            { name: "📌 Prodotto", value: `${product.name} (ID: #${product.id})`, inline: false },
+            { name: "👤 Acquirente Discord", value: `${interaction.user} (@${interaction.user.username})`, inline: false },
+            { name: "🎮 Nome Roblox", value: `**${robloxName}**`, inline: false },
+            { name: "💰 Prima rata", value: euros(firstPayment), inline: true },
+            { name: "💳 Rate totali", value: `${installments}`, inline: true },
+            { name: "🏪 Negozio", value: getShopName(product.shop_key), inline: true }
+          )
+          .addFields(
+            { name: "⚠️ IMPORTANTE", value: `L'acquirente sarà presente al **PROSSIMO RP** per ricevere il pacco!` }
+          )
+          .setImage(product.image_url)
+          .setFooter({ text: "Consegna confermata in chat una volta completata." })
+          .setTimestamp()]
+      });
     }
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("✅ ORDINE CONFERMATO!")
-      .setDescription(`Hai ordinato con successo **${product.name}**!\n\n📦 Il postino te lo consegnerà al **prossimo RP**`)
+      .setTitle("✅ ORDINE A RATE CONFERMATO!")
+      .setDescription(`Hai ordinato **${product.name}** in **${installments} rate**!\n\n📦 Il postino te lo consegnerà al **prossimo RP**.`)
       .addFields(
         { name: "🎮 Nome Roblox", value: robloxName, inline: true },
-        { name: "💸 Pagato", value: euros(price), inline: true },
-        { name: "💶 Saldo rimanente", value: euros(result.buyerBalance), inline: true }
+        { name: "💰 Prima rata", value: euros(firstPayment), inline: true },
+        { name: "💶 Residuo", value: euros(remainingAmount), inline: true }
       )
+      .setFooter({ text: `Prossima rata dovuta il ${nextDue ? new Date(nextDue).toLocaleDateString("it-IT") : "-"}.` })
       .setImage(product.image_url)
-      .setFooter({ text: "✅ Non dimenticare di presentarti al prossimo RP!" })
       .setTimestamp()] });
   } catch (error) {
-    if (error.message === "INSUFFICIENT_FUNDS") return interaction.editReply({ embeds: [err("Saldo insufficiente per comprare questo prodotto.")] });
+    if (error.message === "INSUFFICIENT_FUNDS") return interaction.editReply({ embeds: [err("Saldo insufficiente per pagare questo prodotto.")] });
     if (error.message === "SELLER_ACCOUNT_MISSING") return interaction.editReply({ embeds: [err("Il venditore non ha più un conto bancario valido.")] });
     if (error.message === "BUYER_ACCOUNT_MISSING") return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
     console.error("Errore acquisto online:", error);
     return interaction.editReply({ embeds: [err("Errore durante l'acquisto online. Riprova più tardi.")] });
+  }
+}
+async function handleCartViewButton(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+  const items = await getCartItems(interaction.user.id, interaction.guildId);
+  const embed = buildCartEmbed(items);
+  const components = items.length ? buildCartComponents(items) : [];
+  return interaction.editReply({ embeds: [embed], components });
+}
+async function handleAddToCartButton(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+  const productId = Number(interaction.customId.replace("cart_add_", ""));
+  const product = await getProduct(productId, interaction.guildId);
+  if (!product) return interaction.editReply({ embeds: [err("Prodotto non trovato o non più disponibile.")] });
+  if (product.creator_user_id === interaction.user.id) {
+    return interaction.editReply({ embeds: [err("Non puoi aggiungere al carrello un prodotto creato da te.")] });
+  }
+  await addCartItem(interaction.user.id, interaction.guildId, productId);
+  const items = await getCartItems(interaction.user.id, interaction.guildId);
+  const itemQuantity = items.find(item => item.product_id === productId)?.quantity || 1;
+  return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+    .setTitle("✅ Prodotto aggiunto al carrello")
+    .setDescription(`Hai aggiunto **${product.name}** al carrello.`)
+    .addFields(
+      { name: "Quantità nel carrello", value: `${itemQuantity}`, inline: true },
+      { name: "Totale carrello", value: euros(items.reduce((sum, item) => sum + item.price * item.quantity, 0)), inline: true }
+    )
+    .setTimestamp()] });
+}
+async function handleRemoveCartButton(interaction) {
+  const itemId = Number(interaction.customId.replace("cart_remove_", ""));
+  await removeCartItem(itemId, interaction.user.id, interaction.guildId);
+  const items = await getCartItems(interaction.user.id, interaction.guildId);
+  const embed = buildCartEmbed(items);
+  const components = items.length ? buildCartComponents(items) : [];
+  return interaction.update({ embeds: [embed], components });
+}
+async function handleClearCartButton(interaction) {
+  await clearCart(interaction.user.id, interaction.guildId);
+  const embed = buildCartEmbed([]);
+  return interaction.update({ embeds: [embed], components: [] });
+}
+async function handleCartCheckoutButton(interaction) {
+  const modal = new ModalBuilder()
+    .setCustomId("cart_checkout_pin")
+    .setTitle("Checkout Carrello");
+  const pinInput = new TextInputBuilder()
+    .setCustomId("pin")
+    .setLabel("Inserisci il PIN del tuo conto (4 cifre)")
+    .setPlaceholder("1234")
+    .setMinLength(4)
+    .setMaxLength(4)
+    .setRequired(true)
+    .setStyle(TextInputStyle.Short);
+  const robloxInput = new TextInputBuilder()
+    .setCustomId("roblox_name")
+    .setLabel("Inserisci il tuo NOME ROBLOX")
+    .setPlaceholder("Il tuo username Roblox esatto")
+    .setMinLength(3)
+    .setMaxLength(20)
+    .setRequired(true)
+    .setStyle(TextInputStyle.Short);
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(pinInput),
+    new ActionRowBuilder().addComponents(robloxInput)
+  );
+  return interaction.showModal(modal);
+}
+async function handleCartCheckoutModal(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+  const pin = interaction.fields.getTextInputValue("pin").trim();
+  const robloxName = interaction.fields.getTextInputValue("roblox_name").trim();
+  if (!/^[0-9]{4}$/.test(pin)) {
+    return interaction.editReply({ embeds: [err("Il PIN deve essere composto da 4 cifre.")] });
+  }
+  if (!robloxName) {
+    return interaction.editReply({ embeds: [err("Devi inserire il tuo nome Roblox.")] });
+  }
+  const cartItems = await getCartItems(interaction.user.id, interaction.guildId);
+  if (!cartItems.length) {
+    return interaction.editReply({ embeds: [err("Il tuo carrello è vuoto. Aggiungi prima dei prodotti.")] });
+  }
+  const buyer = await getAccount(interaction.user.id, interaction.guildId);
+  if (!buyer) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
+  if (!buyer.pin_hash) return interaction.editReply({ embeds: [err("Non hai ancora un PIN. Usa **/creapin** prima di comprare.")] });
+  if (hashPin(pin) !== buyer.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Pagamento annullato.")] });
+  const totalAmount = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  if (buyer.balance < totalAmount) return interaction.editReply({ embeds: [err("Saldo insufficiente per pagare l'intero carrello.")] });
+
+  try {
+    await completeCartPurchase({ buyerId: interaction.user.id, guildId: interaction.guildId, cartItems });
+    await clearCart(interaction.user.id, interaction.guildId);
+    const guild = interaction.guild || await interaction.client.guilds.fetch(interaction.guildId).catch(() => null);
+    if (guild) {
+      await sendDmToRoleMembers(guild, POSTINO_ROLE_ID, {
+        embeds: [new EmbedBuilder().setColor(0x3498db)
+          .setTitle("📦 ORDINE CARRELLO ONLINE")
+          .setDescription(`Un nuovo ordine da carrello è pronto per la consegna.`)
+          .addFields(
+            { name: "👤 Acquirente Discord", value: `${interaction.user} (@${interaction.user.username})`, inline: false },
+            { name: "🎮 Nome Roblox", value: `**${robloxName}**`, inline: false },
+            { name: "📌 Prodotti", value: cartItems.map(item => `• ${item.name} x${item.quantity} (${euros(item.price * item.quantity)})`).join("\n"), inline: false },
+            { name: "💰 Totale", value: euros(totalAmount), inline: true }
+          )
+          .setFooter({ text: "Il postino consegnerà al prossimo RP." })
+          .setTimestamp()]
+      });
+    }
+    const sellers = new Map();
+    for (const item of cartItems) {
+      const entries = sellers.get(item.creator_user_id) || [];
+      entries.push(item);
+      sellers.set(item.creator_user_id, entries);
+    }
+    for (const [sellerId, items] of sellers.entries()) {
+      const sellerUser = await interaction.client.users.fetch(sellerId).catch(() => null);
+      if (!sellerUser) continue;
+      await sellerUser.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+        .setTitle("💸 Ordine dal tuo negozio")
+        .setDescription(`${interaction.user.tag} ha acquistato prodotti dal tuo negozio.`)
+        .addFields(
+          { name: "Prodotti", value: items.map(item => `• ${item.name} x${item.quantity} (${euros(item.price * item.quantity)})`).join("\n"), inline: false },
+          { name: "Totale ricevuto", value: euros(items.reduce((sum, item) => sum + item.price * item.quantity, 0)), inline: true }
+        )
+        .setTimestamp()] }).catch(() => {});
+    }
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle("✅ Acquisto completato")
+      .setDescription(`Hai pagato con successo il carrello per **${euros(totalAmount)}**.`)
+      .addFields(
+        { name: "🎮 Nome Roblox", value: robloxName, inline: true },
+        { name: "📦 Prodotti", value: cartItems.map(item => `• ${item.name} x${item.quantity}`).join("\n"), inline: false },
+        { name: "⚠️ Nota", value: "Presentati al prossimo RP per ricevere la consegna dal postino.", inline: false }
+      )
+      .setTimestamp()] });
+  } catch (error) {
+    if (error.message === "INSUFFICIENT_FUNDS") return interaction.editReply({ embeds: [err("Saldo insufficiente per pagare l'intero carrello.")] });
+    if (error.message === "SELLER_ACCOUNT_MISSING") return interaction.editReply({ embeds: [err("Uno dei venditori non ha più un conto bancario valido.")] });
+    if (error.message === "BUYER_ACCOUNT_MISSING") return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
+    if (error.message === "CANNOT_BUY_OWN_PRODUCT") return interaction.editReply({ embeds: [err("Non puoi acquistare prodotti creati da te.")] });
+    console.error("Errore checkout carrello:", error);
+    return interaction.editReply({ embeds: [err("Errore durante il checkout del carrello. Riprova più tardi.")] });
   }
 }
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.DirectMessages] });
@@ -1277,8 +1792,11 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isButton() && interaction.customId.startsWith("carta_completa_")) {
       await handleFullCardButton(interaction);
     }
-    if (interaction.isButton() && interaction.customId === "online_shop_open") {
+      if (interaction.isButton() && interaction.customId === "online_shop_open") {
       await handleOnlineShopOpen(interaction);
+    }
+    if (interaction.isButton() && interaction.customId === "cart_view") {
+      await handleCartViewButton(interaction);
     }
     if (interaction.isStringSelectMenu() && interaction.customId === "online_shop_select") {
       await handleOnlineShopSelect(interaction);
@@ -1286,11 +1804,20 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isStringSelectMenu() && interaction.customId === "online_product_select") {
       await handleOnlineProductSelect(interaction);
     }
-    if (interaction.isButton() && interaction.customId.startsWith("online_buy_")) {
-      await handleOnlineBuyButton(interaction);
+    if (interaction.isButton() && interaction.customId.startsWith("cart_add_")) {
+      await handleAddToCartButton(interaction);
     }
-    if (interaction.isModalSubmit() && interaction.customId.startsWith("online_pin_")) {
-      await handleOnlinePinModal(interaction);
+    if (interaction.isButton() && interaction.customId.startsWith("cart_remove_")) {
+      await handleRemoveCartButton(interaction);
+    }
+    if (interaction.isButton() && interaction.customId === "cart_clear") {
+      await handleClearCartButton(interaction);
+    }
+    if (interaction.isButton() && interaction.customId === "cart_checkout") {
+      await handleCartCheckoutButton(interaction);
+    }
+    if (interaction.isModalSubmit() && interaction.customId === "cart_checkout_pin") {
+      await handleCartCheckoutModal(interaction);
     }
   } catch (e) {
     console.error(e);
