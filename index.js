@@ -15,7 +15,6 @@ const token = process.env.DISCORD_BOT_TOKEN;
 const dbUrl = process.env.DATABASE_URL;
 const STAFF_ROLE_ID = "1504115375577497600";
 const CONCESSIONARIO_ROLE_ID = "1514960724626116721";
-const CESARE_ID = "329404289925685249";
 const STIPENDIO = 1500;
 
 if (!token) { console.error("DISCORD_BOT_TOKEN mancante"); process.exit(1); }
@@ -259,16 +258,16 @@ const commands = [
     .addStringOption(o => o.setName("cognome").setDescription("Il tuo cognome").setRequired(true))
     .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
   new SlashCommandBuilder().setName("case").setDescription("Visualizza le case disponibili e richiedi una casa"),
-  new SlashCommandBuilder().setName("aggiungi_casa").setDescription("[SOLO CESARE] Aggiungi una casa in vendita")
+  new SlashCommandBuilder().setName("aggiungi_casa").setDescription("[SOLO STAFF] Aggiungi una casa in vendita")
     .addStringOption(o => o.setName("nome").setDescription("Nome della casa").setRequired(true))
     .addIntegerOption(o => o.setName("prezzo").setDescription("Prezzo della casa").setRequired(true).setMinValue(1)),
   new SlashCommandBuilder().setName("auto").setDescription("Visualizza le auto disponibili e richiedi un'auto"),
-  new SlashCommandBuilder().setName("aggiungi_auto").setDescription("[SOLO STAFF CONCESSIONARIO] Aggiungi un'auto in vendita")
+  new SlashCommandBuilder().setName("aggiungi_auto").setDescription("[SOLO CONCESSIONARIO] Aggiungi un'auto in vendita")
     .addStringOption(o => o.setName("nome").setDescription("Nome dell'auto").setRequired(true))
     .addIntegerOption(o => o.setName("prezzo").setDescription("Prezzo dell'auto").setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName("immagine_url").setDescription("URL dell'immagine dell'auto").setRequired(false)),
-  new SlashCommandBuilder().setName("richieste_casa").setDescription("[SOLO CESARE] Visualizza le richieste di case in sospeso"),
-  new SlashCommandBuilder().setName("richieste_auto").setDescription("[SOLO STAFF CONCESSIONARIO] Visualizza le richieste di auto in sospeso"),
+  new SlashCommandBuilder().setName("richieste_casa").setDescription("[SOLO STAFF] Visualizza le richieste di case in sospeso"),
+  new SlashCommandBuilder().setName("richieste_auto").setDescription("[SOLO CONCESSIONARIO] Visualizza le richieste di auto in sospeso"),
 ];
 
 async function handleCommand(interaction) {
@@ -484,7 +483,8 @@ async function handleCommand(interaction) {
   }
 
   if (commandName === "aggiungi_casa") {
-    if (user.id !== CESARE_ID) return interaction.editReply({ embeds: [err("Solo Cesare può aggiungere case!")] });
+    const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
+    if (!hasRole) return interaction.editReply({ embeds: [err("Solo lo Staff può aggiungere case!")] });
     const nome = interaction.options.getString("nome", true);
     const prezzo = interaction.options.getInteger("prezzo", true);
     
@@ -523,7 +523,7 @@ async function handleCommand(interaction) {
 
   if (commandName === "aggiungi_auto") {
     const hasRole = member.roles?.cache?.has(CONCESSIONARIO_ROLE_ID);
-    if (!hasRole) return interaction.editReply({ embeds: [err("Solo il concessionario (Staff) può aggiungere auto!")] });
+    if (!hasRole) return interaction.editReply({ embeds: [err("Solo il Concessionario può aggiungere auto!")] });
     const nome = interaction.options.getString("nome", true);
     const prezzo = interaction.options.getInteger("prezzo", true);
     const imgUrl = interaction.options.getString("immagine_url");
@@ -538,7 +538,8 @@ async function handleCommand(interaction) {
   }
 
   if (commandName === "richieste_casa") {
-    if (user.id !== CESARE_ID) return interaction.editReply({ embeds: [err("Solo Cesare può vedere le richieste!")] });
+    const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
+    if (!hasRole) return interaction.editReply({ embeds: [err("Solo lo Staff può vedere le richieste di case!")] });
     const { rows: requests } = await query(`
       SELECT hr.*, h.nome as casa_nome, h.prezzo
       FROM house_requests hr
@@ -558,7 +559,7 @@ async function handleCommand(interaction) {
 
   if (commandName === "richieste_auto") {
     const hasRole = member.roles?.cache?.has(CONCESSIONARIO_ROLE_ID);
-    if (!hasRole) return interaction.editReply({ embeds: [err("Solo il concessionario (Staff) può vedere le richieste!")] });
+    if (!hasRole) return interaction.editReply({ embeds: [err("Solo il Concessionario può vedere le richieste di auto!")] });
     const { rows: requests } = await query(`
       SELECT cr.*, c.nome as auto_nome, c.prezzo
       FROM car_requests cr
