@@ -338,11 +338,13 @@ const commands = [
     .setDescription("Paga un utente con soldi dal tuo conto bancario")
     .addUserOption(o => o.setName("utente").setDescription("Chi vuoi pagare").setRequired(true))
     .addIntegerOption(o => o.setName("importo").setDescription("Quanti euro inviare").setRequired(true).setMinValue(1))
-    .addStringOption(o => o.setName("motivo").setDescription("Motivo del pagamento").setRequired(true))
-    .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN per confermare").setRequired(true).setMinValue(1000).setMaxValue(9999)),
+    .addStringOption(o => o.setName("motivo").setDescription("Motivo del pagamento").setRequired(true)),
   new SlashCommandBuilder()
     .setName("saldo")
     .setDescription("Controlla il saldo del tuo conto bancario"),
+  new SlashCommandBuilder()
+    .setName("mostra-conto")
+    .setDescription("Visualizza i dettagli del tuo conto bancario"),
   new SlashCommandBuilder()
     .setName("stipendio")
     .setDescription("Visualizza quando arriverà il tuo prossimo stipendio"),
@@ -423,7 +425,6 @@ async function handleCommand(interaction) {
     const target = interaction.options.getUser("utente", true);
     const importo = interaction.options.getInteger("importo", true);
     const motivo = interaction.options.getString("motivo", true);
-    const pin = interaction.options.getInteger("pin", true);
     
     if (target.id === user.id) return interaction.editReply({ embeds: [err("Non puoi pagare te stesso")] });
     if (target.bot) return interaction.editReply({ embeds: [err("Non puoi pagare un bot")] });
@@ -431,8 +432,6 @@ async function handleCommand(interaction) {
     const mittente = await getAccount(user.id, guildId);
     if (!mittente) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**")] });
     if (!mittente.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima")] });
-    if (hashPin(pin) !== mittente.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Transazione annullata")] });
-    if (mittente.balance < importo * 100) return interaction.editReply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(mittente.balance)}`)] });
     
     const destinatario = await getAccount(target.id, guildId);
     if (!destinatario) return interaction.editReply({ embeds: [err(`${target.displayName} non ha un conto bancario`)] });
@@ -442,39 +441,23 @@ async function handleCommand(interaction) {
     // Embed di conferma
     const confirmEmbed = new EmbedBuilder()
       .setColor(0x3498db)
-      .setTitle("💳 Conferma Pagamento")
-      .setDescription(`Stai per inviare denaro a ${target}`)
+      .setTitle("💳 Effettua Pagamento")
       .addFields(
         { name: "👤 Mittente", value: user.toString(), inline: true },
         { name: "🎯 Destinatario", value: target.toString(), inline: true },
-        { name: "💰 Importo", value: euros(amountInCents), inline: false },
+        { name: "�� Importo", value: euros(amountInCents), inline: false },
         { name: "📝 Motivo", value: motivo, inline: false }
       )
       .setTimestamp();
     
-    const confirmButton = new ButtonBuilder()
-      .setCustomId(`confirm_pay_${target.id}_${amountInCents}`)
-      .setLabel("✅ Conferma")
+    const payButton = new ButtonBuilder()
+      .setCustomId(`pay_button_${target.id}_${amountInCents}_${motivo}`)
+      .setLabel("💳 Paga")
       .setStyle(ButtonStyle.Success);
     
-    const cancelButton = new ButtonBuilder()
-      .setCustomId("cancel_pay")
-      .setLabel("❌ Annulla")
-      .setStyle(ButtonStyle.Danger);
-    
-    const row = new ActionRowBuilder().addComponents(confirmButton, cancelButton);
+    const row = new ActionRowBuilder().addComponents(payButton);
     
     await interaction.editReply({ embeds: [confirmEmbed], components: [row] });
-    
-    // Store transaction data
-    interaction.client.pendingTransactions = interaction.client.pendingTransactions || new Map();
-    interaction.client.pendingTransactions.set(`pay_${user.id}`, {
-      mittente: user.id,
-      destinatario: target.id,
-      amount: amountInCents,
-      motivo,
-      guildId
-    });
   }
 
   if (commandName === "saldo") {
@@ -489,6 +472,32 @@ async function handleCommand(interaction) {
         { name: "🔐 PIN", value: acc.pin_hash ? "✅ Impostato" : "❌ Non impostato", inline: true }
       )
       .setTimestamp()] });
+  }
+
+  if (commandName === "mostra-conto") {
+    const acc = await getAccount(user.id, guildId);
+    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno")] });
+    
+    const detailsEmbed = new EmbedBuilder()
+      .setColor(0x3498db)
+      .setTitle("🏦 Dettagli Conto Bancario")
+      .setThumbnail(user.displayAvatarURL())
+      .addFields(
+        { name: "👤 Titolare", value: user.toString(), inline: false },
+        { name: "💶 Saldo", value: euros(acc.balance), inline: true },
+        { name: "🔐 PIN", value: acc.pin_hash ? "✅ Impostato" : "❌ Non impostato", inline: true },
+        { name: "📅 Conto Aperto", value: new Date(acc.created_at).toLocaleDateString("it-IT"), inline: true }
+      )
+      .setTimestamp();
+    
+    const detailsButton = new ButtonBuilder()
+      .setCustomId(`mostra_dettagli_conto_${user.id}`)
+      .setLabel("🔐 Mostra Dettagli Completi")
+      .setStyle(ButtonStyle.Primary);
+    
+    const row = new ActionRowBuilder().addComponents(detailsButton);
+    
+    await interaction.editReply({ embeds: [detailsEmbed], components: [row] });
   }
 
   if (commandName === "stipendio") {
@@ -845,41 +854,60 @@ async function handleButtonInteraction(interaction) {
       .setDescription(cars.map(c => `#${c.id} • **${c.name}** - ${euros(c.price)}`).join("\n"));
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
-  
-  if (customId.startsWith("confirm_pay_")) {
-    const [_, targetId, amount] = customId.split("_");
-    const pendingTx = interaction.client.pendingTransactions?.get(`pay_${user.id}`);
+
+  if (customId.startsWith("mostra_dettagli_conto_")) {
+    const targetId = customId.replace("mostra_dettagli_conto_", "");
+    const acc = await getAccount(targetId, guildId);
     
-    if (!pendingTx) return interaction.reply({ content: "❌ Transazione scaduta", ephemeral: true });
-    
-    const mittente = await getAccount(user.id, guildId);
-    if (!mittente || mittente.balance < Number(amount)) {
-      return interaction.reply({ content: "❌ Saldo insufficiente", ephemeral: true });
+    if (!acc) {
+      return interaction.reply({ embeds: [err("Conto non trovato")], ephemeral: true });
     }
-    
-    await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [amount, user.id, guildId]);
-    await query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [amount, targetId, guildId]);
-    await query(
-      "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'pagamento')",
-      [user.id, targetId, guildId, amount, pendingTx.motivo]
-    );
-    
-    interaction.client.pendingTransactions.delete(`pay_${user.id}`);
-    
-    const successEmbed = new EmbedBuilder()
-      .setColor(0x2ecc71)
-      .setTitle("✅ Pagamento Effettuato")
+
+    const fullDetailsEmbed = new EmbedBuilder()
+      .setColor(0x9B59B6)
+      .setTitle("🔐 Dettagli Completi Conto")
       .addFields(
-        { name: "Importo", value: euros(amount), inline: true },
-        { name: "A", value: `<@${targetId}>`, inline: true }
-      );
-    
-    return interaction.reply({ embeds: [successEmbed], ephemeral: true });
+        { name: "👤 Titolare", value: `<@${targetId}>`, inline: false },
+        { name: "💶 Saldo Corrente", value: euros(acc.balance), inline: true },
+        { name: "🔐 Protezione PIN", value: acc.pin_hash ? "✅ Attiva" : "❌ Disattiva", inline: true },
+        { name: "📅 Data Apertura", value: new Date(acc.created_at).toLocaleDateString("it-IT"), inline: false }
+      )
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [fullDetailsEmbed], ephemeral: true });
   }
-  
-  if (customId === "cancel_pay") {
-    interaction.client.pendingTransactions?.delete(`pay_${user.id}`);
-    return interaction.reply({ content: "❌ Pagamento annullato", ephemeral: true });
+
+  if (customId.startsWith("pay_button_")) {
+    const parts = customId.split("_");
+    const targetId = parts[2];
+    const amount = parseInt(parts[3]);
+    const motivo = parts.slice(4).join("_");
+
+    const mittente = await getAccount(user.id, guildId);
+    if (!mittente) {
+      return interaction.reply({ embeds: [err("Conto non trovato")], ephemeral: true });
+    }
+
+    if (mittente.balance < amount) {
+      return interaction.reply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(mittente.balance)}`)], ephemeral: true });
+    }
+
+    // Mostra modal per PIN
+    const modal = new ModalBuilder()
+      .setCustomId(`pay_modal_${targetId}_${amount}_${motivo}`)
+      .setTitle("Conferma Pagamento");
+
+    const pinInput = new TextInputBuilder()
+      .setCustomId("pay_pin")
+      .setLabel("Il tuo PIN (4 cifre)")
+      .setStyle(TextInputStyle.Short)
+      .setMinLength(4)
+      .setMaxLength(4)
+      .setRequired(true);
+
+    const row = new ActionRowBuilder().addComponents(pinInput);
+    modal.addComponents(row);
+    await interaction.showModal(modal);
   }
   
   if (customId.startsWith("buy_product_")) {
@@ -945,6 +973,55 @@ async function handleButtonInteraction(interaction) {
 
 async function handleModalSubmit(interaction) {
   const { customId, user, guildId, fields } = interaction;
+
+  if (customId.startsWith("pay_modal_")) {
+    const parts = customId.split("_");
+    const targetId = parts[2];
+    const amount = parseInt(parts[3]);
+    const motivo = parts.slice(4).join("_");
+
+    const pinStr = fields.getTextInputValue("pay_pin");
+    const pin = parseInt(pinStr);
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const mittente = await getAccount(user.id, guildId);
+    if (!mittente) {
+      return interaction.editReply({ embeds: [err("Conto non trovato")] });
+    }
+
+    if (hashPin(pin) !== mittente.pin_hash) {
+      return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
+    }
+
+    if (mittente.balance < amount) {
+      return interaction.editReply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(mittente.balance)}`)] });
+    }
+
+    try {
+      await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [amount, user.id, guildId]);
+      await query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [amount, targetId, guildId]);
+      await query(
+        "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'pagamento')",
+        [user.id, targetId, guildId, amount, motivo]
+      );
+
+      const successEmbed = new EmbedBuilder()
+        .setColor(0x2ecc71)
+        .setTitle("✅ Pagamento Effettuato")
+        .addFields(
+          { name: "💰 Importo", value: euros(amount), inline: true },
+          { name: "🎯 Destinatario", value: `<@${targetId}>`, inline: true },
+          { name: "📝 Motivo", value: motivo, inline: false }
+        )
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [successEmbed] });
+    } catch (error) {
+      console.error("Errore nel pagamento:", error);
+      return interaction.editReply({ embeds: [err(`Errore durante il pagamento: ${error.message}`)] });
+    }
+  }
 
   if (customId.startsWith("purchase_modal_")) {
     const parts = customId.split("_");
