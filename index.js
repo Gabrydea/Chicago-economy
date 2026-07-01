@@ -26,13 +26,12 @@ const DEFAULT_ROLE_SALARIES = {
   "1504115619291730041": 100,
 };
 const SHOP_CATALOG = [
-  { name: "Telefonia", value: "telefonia" },
+  { name: "Telefonica", value: "telefonica" },
   { name: "Elettronica", value: "elettronica" },
   { name: "Supermercato", value: "supermercato" },
   { name: "Farmacia", value: "farmacia" },
   { name: "Abbigliamento", value: "abbigliamento" },
   { name: "Gioielleria", value: "gioielleria" },
-  { name: "Concessionaria", value: "concessionaria" },
   { name: "Garage e Ricambi", value: "garage" },
   { name: "Benzinaio", value: "benzinaio" },
   { name: "Immobiliare", value: "immobiliare" },
@@ -40,13 +39,8 @@ const SHOP_CATALOG = [
   { name: "Ferramenta", value: "ferramenta" },
   { name: "Ristorante", value: "ristorante" },
   { name: "Fast Food", value: "fast_food" },
-  { name: "Pizzeria", value: "pizzeria" },
   { name: "Bar", value: "bar" },
   { name: "Gelateria", value: "gelateria" },
-  { name: "Panetteria", value: "panetteria" },
-  { name: "Animali", value: "animali" },
-  { name: "Ospedale", value: "ospedale" },
-  { name: "Parrucchiere", value: "parrucchiere" },
 ];
 const CARD_FONT_FAMILY = "ChicagoCardSans";
 const salaryCache = new Map();
@@ -174,6 +168,28 @@ async function setupDb() {
     message_id TEXT,
     status TEXT DEFAULT 'pending',
     created_at TIMESTAMPTZ DEFAULT NOW()
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS orders (
+    id SERIAL PRIMARY KEY,
+    buyer_user_id TEXT NOT NULL,
+    seller_user_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    product_id INTEGER NOT NULL,
+    product_name TEXT NOT NULL,
+    shop_key TEXT NOT NULL,
+    price BIGINT NOT NULL,
+    roblox_user TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS salary_history (
+    id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    month TEXT NOT NULL,
+    amount BIGINT NOT NULL,
+    paid_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, guild_id, month)
   )`);
   await query(`CREATE INDEX IF NOT EXISTS idx_products_guild_shop ON products(guild_id, shop_key)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_products_creator ON products(guild_id, creator_user_id)`);
@@ -328,6 +344,9 @@ const commands = [
     .setName("saldo")
     .setDescription("Controlla il saldo del tuo conto bancario"),
   new SlashCommandBuilder()
+    .setName("stipendio")
+    .setDescription("Visualizza quando arriverà il tuo prossimo stipendio"),
+  new SlashCommandBuilder()
     .setName("case")
     .setDescription("Visualizza le case disponibili"),
   new SlashCommandBuilder()
@@ -354,10 +373,21 @@ const commands = [
     .setDescription("[SOLO CONCESSIONARIO] Rimuove un'auto")
     .addIntegerOption(o => o.setName("id").setDescription("ID dell'auto").setRequired(true).setMinValue(1)),
   new SlashCommandBuilder()
+    .setName("creaprodotto")
+    .setDescription("[SOLO CREATORE] Crea un prodotto per un negozio")
+    .addStringOption(o => o.setName("negozio").setDescription("Seleziona il negozio").setRequired(true).addChoices(...SHOP_CATALOG.map(s => ({ name: s.name, value: s.value }))))
+    .addStringOption(o => o.setName("nome").setDescription("Nome del prodotto").setRequired(true))
+    .addStringOption(o => o.setName("prezzo").setDescription("Prezzo in euro").setRequired(true))
+    .addAttachmentOption(o => o.setName("immagine").setDescription("Foto del prodotto").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("compra-online")
+    .setDescription("Compra prodotti online dai negozi"),
+  new SlashCommandBuilder()
     .setName("richiesta-lavoro")
     .setDescription("Fai una richiesta di lavoro")
     .addStringOption(o => o.setName("posizione").setDescription("Posizione lavorativa desiderata").setRequired(true)),
 ];
+
 async function handleCommand(interaction) {
   const { commandName, user, guildId, member } = interaction;
   await interaction.deferReply({ ephemeral: false });
@@ -459,6 +489,42 @@ async function handleCommand(interaction) {
         { name: "🔐 PIN", value: acc.pin_hash ? "✅ Impostato" : "❌ Non impostato", inline: true }
       )
       .setTimestamp()] });
+  }
+
+  if (commandName === "stipendio") {
+    const acc = await getAccount(user.id, guildId);
+    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno")] });
+    
+    const salaries = await getSalaries(guildId);
+    const { totale, ruoli } = calcolaStipendio(member, salaries);
+    
+    const today = new Date();
+    const nextSalaryDate = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+    if (today.getDate() > 1) {
+      nextSalaryDate.setFullYear(today.getFullYear());
+    }
+    
+    const daysUntilSalary = Math.ceil((nextSalaryDate - today) / (1000 * 60 * 60 * 24));
+    
+    let rolesText = ruoli.length > 0 
+      ? ruoli.map(r => `<@&${r.roleId}> - ${euros(r.importo * 100)}`).join("\n")
+      : "❌ Non hai nessun ruolo associato";
+    
+    if (ruoli.length === 0) {
+      rolesText += `\n\n> Se pensi sia un errore, contatta <@${CONTACT_USER_ID}>`;
+    }
+    
+    const embed = new EmbedBuilder()
+      .setColor(0x2ecc71)
+      .setTitle("💰 Informazioni Stipendio")
+      .addFields(
+        { name: "📅 Prossimo Stipendio", value: `${nextSalaryDate.toLocaleDateString("it-IT")} (tra ${daysUntilSalary} giorni)`, inline: false },
+        { name: "💵 Importo Totale", value: totale > 0 ? euros(totale * 100) : "€0", inline: true },
+        { name: "👔 I Tuoi Ruoli", value: rolesText, inline: false }
+      )
+      .setTimestamp();
+    
+    return interaction.editReply({ embeds: [embed] });
   }
 
   if (commandName === "case") {
@@ -587,6 +653,57 @@ async function handleCommand(interaction) {
       .setDescription(`L'auto **${car.name}** è stata rimossa`)] });
   }
 
+  if (commandName === "creaprodotto") {
+    if (user.id !== CONTACT_USER_ID) {
+      return interaction.editReply({ embeds: [err("Solo il creatore può creare prodotti")] });
+    }
+    
+    const shopKey = interaction.options.getString("negozio", true);
+    const nome = interaction.options.getString("nome", true);
+    const prezzoStr = interaction.options.getString("prezzo", true);
+    const prezzo = parsePrice(prezzoStr);
+    const immagine = interaction.options.getAttachment("immagine", true);
+    
+    if (!isImageAttachment(immagine)) return interaction.editReply({ embeds: [err("L'allegato deve essere un'immagine")] });
+    
+    const shopName = getShopName(shopKey);
+    
+    const { rows } = await query(
+      "INSERT INTO products(guild_id, creator_user_id, shop_key, name, price, image_url) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
+      [guildId, user.id, shopKey, nome, prezzo, immagine.url]
+    );
+    
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle("📦 Prodotto Creato")
+      .addFields(
+        { name: "Negozio", value: shopName, inline: true },
+        { name: "Nome", value: nome, inline: true },
+        { name: "Prezzo", value: euros(prezzo), inline: true },
+        { name: "ID", value: `#${rows[0].id}`, inline: true }
+      )
+      .setImage(immagine.url)] });
+  }
+
+  if (commandName === "compra-online") {
+    const shopOptions = SHOP_CATALOG.map(shop => ({
+      label: shop.name,
+      value: shop.value,
+      emoji: "🛍️"
+    }));
+
+    const selectMenu = new StringSelectMenuBuilder()
+      .setCustomId("select_shop")
+      .setPlaceholder("Scegli il negozio")
+      .addOptions(shopOptions);
+
+    const row = new ActionRowBuilder().addComponents(selectMenu);
+
+    return interaction.editReply({ 
+      content: "🛍️ **Seleziona il negozio dove vuoi fare acquisti**",
+      components: [row] 
+    });
+  }
+
   if (commandName === "richiesta-lavoro") {
     const position = interaction.options.getString("posizione", true);
     
@@ -613,6 +730,98 @@ async function handleCommand(interaction) {
     const row = new ActionRowBuilder().addComponents(approveButton, rejectButton);
     
     return interaction.editReply({ embeds: [embed], components: [row] });
+  }
+}
+
+async function handleSelectMenu(interaction) {
+  const { customId, user, guildId, values } = interaction;
+
+  if (customId === "select_shop") {
+    const shopKey = values[0];
+    const shopName = getShopName(shopKey);
+    const products = await listProductsForShop(guildId, shopKey);
+
+    if (!products.length) {
+      return interaction.reply({ 
+        embeds: [err(`Non ci sono prodotti disponibili in **${shopName}**`)],
+        ephemeral: true 
+      });
+    }
+
+    const productOptions = products.slice(0, 25).map(p => ({
+      label: `${p.name} - ${euros(p.price)}`.substring(0, 100),
+      value: `product_${p.id}`,
+      emoji: "📦"
+    }));
+
+    const selectMenu = new StringSelectMenuBuilder()
+      .setCustomId(`select_product_${shopKey}`)
+      .setPlaceholder("Scegli il prodotto")
+      .addOptions(productOptions);
+
+    const row = new ActionRowBuilder().addComponents(selectMenu);
+
+    await interaction.reply({ 
+      content: `📦 **Prodotti in ${shopName}** (${products.length} disponibili)`,
+      components: [row],
+      ephemeral: true
+    });
+  }
+
+  if (customId.startsWith("select_product_")) {
+    const shopKey = customId.replace("select_product_", "");
+    const productId = parseInt(values[0].replace("product_", ""));
+    const product = await getProduct(productId, guildId);
+
+    if (!product) {
+      return interaction.reply({ 
+        embeds: [err("Prodotto non trovato")],
+        ephemeral: true 
+      });
+    }
+
+    const buyerAcc = await getAccount(user.id, guildId);
+    if (!buyerAcc) {
+      return interaction.reply({ 
+        embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno")],
+        ephemeral: true 
+      });
+    }
+
+    if (!buyerAcc.pin_hash) {
+      return interaction.reply({ 
+        embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima")],
+        ephemeral: true 
+      });
+    }
+
+    const productEmbed = new EmbedBuilder()
+      .setColor(0x3498db)
+      .setTitle(`📦 ${product.name}`)
+      .setImage(product.image_url)
+      .addFields(
+        { name: "💰 Prezzo", value: euros(product.price), inline: true },
+        { name: "🏪 Negozio", value: getShopName(shopKey), inline: true }
+      )
+      .setTimestamp();
+
+    const buyButton = new ButtonBuilder()
+      .setCustomId(`buy_product_${productId}_${product.creator_user_id}`)
+      .setLabel("💳 Acquista")
+      .setStyle(ButtonStyle.Success);
+
+    const backButton = new ButtonBuilder()
+      .setCustomId(`select_shop`)
+      .setLabel("← Indietro")
+      .setStyle(ButtonStyle.Secondary);
+
+    const row = new ActionRowBuilder().addComponents(buyButton, backButton);
+
+    return interaction.reply({ 
+      embeds: [productEmbed],
+      components: [row],
+      ephemeral: true
+    });
   }
 }
 
@@ -673,6 +882,47 @@ async function handleButtonInteraction(interaction) {
     return interaction.reply({ content: "❌ Pagamento annullato", ephemeral: true });
   }
   
+  if (customId.startsWith("buy_product_")) {
+    const parts = customId.split("_");
+    const productId = parseInt(parts[2]);
+    const sellerId = parts[3];
+
+    const product = await getProduct(productId, guildId);
+    if (!product) {
+      return interaction.reply({ embeds: [err("Prodotto non trovato")], ephemeral: true });
+    }
+
+    const buyerAcc = await getAccount(user.id, guildId);
+    if (buyerAcc.balance < product.price) {
+      return interaction.reply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(buyerAcc.balance)}`)], ephemeral: true });
+    }
+
+    // Mostra modal per Roblox user e PIN
+    const modal = new ModalBuilder()
+      .setCustomId(`purchase_modal_${productId}_${sellerId}`)
+      .setTitle("Completa l'Acquisto");
+
+    const robloxInput = new TextInputBuilder()
+      .setCustomId("roblox_user")
+      .setLabel("Il tuo Username Roblox")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const pinInput = new TextInputBuilder()
+      .setCustomId("purchase_pin")
+      .setLabel("Il tuo PIN (4 cifre)")
+      .setStyle(TextInputStyle.Short)
+      .setMinLength(4)
+      .setMaxLength(4)
+      .setRequired(true);
+
+    const row1 = new ActionRowBuilder().addComponents(robloxInput);
+    const row2 = new ActionRowBuilder().addComponents(pinInput);
+
+    modal.addComponents(row1, row2);
+    await interaction.showModal(modal);
+  }
+
   if (customId.startsWith("approve_job_")) {
     const [_, userId, position] = customId.split("_");
     const embedApprove = new EmbedBuilder()
@@ -690,6 +940,133 @@ async function handleButtonInteraction(interaction) {
       .setDescription("La richiesta di lavoro è stata rifiutata");
     
     return interaction.reply({ embeds: [embedReject], ephemeral: false });
+  }
+}
+
+async function handleModalSubmit(interaction) {
+  const { customId, user, guildId, fields } = interaction;
+
+  if (customId.startsWith("purchase_modal_")) {
+    const parts = customId.split("_");
+    const productId = parseInt(parts[2]);
+    const sellerId = parts[3];
+
+    const robloxUser = fields.getTextInputValue("roblox_user");
+    const pinStr = fields.getTextInputValue("purchase_pin");
+    const pin = parseInt(pinStr);
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const product = await getProduct(productId, guildId);
+    if (!product) {
+      return interaction.editReply({ embeds: [err("Prodotto non trovato")] });
+    }
+
+    const buyer = await getAccount(user.id, guildId);
+    if (!buyer) {
+      return interaction.editReply({ embeds: [err("Conto non trovato")] });
+    }
+
+    if (hashPin(pin) !== buyer.pin_hash) {
+      return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
+    }
+
+    if (buyer.balance < product.price) {
+      return interaction.editReply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(buyer.balance)}`)] });
+    }
+
+    try {
+      await completeOnlinePurchase({
+        buyerId: user.id,
+        sellerId: sellerId,
+        guildId: guildId,
+        amount: product.price,
+        productName: product.name,
+        productId: product.id
+      });
+
+      // Salva l'ordine
+      await query(
+        "INSERT INTO orders(buyer_user_id, seller_user_id, guild_id, product_id, product_name, shop_key, price, roblox_user) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+        [user.id, sellerId, guildId, product.id, product.name, product.shop_key, product.price, robloxUser]
+      );
+
+      const successEmbed = new EmbedBuilder()
+        .setColor(0x2ecc71)
+        .setTitle("✅ Acquisto Completato!")
+        .addFields(
+          { name: "📦 Prodotto", value: product.name, inline: true },
+          { name: "💰 Importo", value: euros(product.price), inline: true },
+          { name: "👤 Username Roblox", value: robloxUser, inline: false }
+        )
+        .setDescription("Stai in RP! Il pacco arriverà presto a te!")
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [successEmbed] });
+
+      // DM al venditore
+      const client = interaction.client;
+      const seller = await client.users.fetch(sellerId).catch(() => null);
+      if (seller) {
+        const sellerEmbed = new EmbedBuilder()
+          .setColor(0x3498db)
+          .setTitle("📦 Nuovo Acquisto Online!")
+          .addFields(
+            { name: "👤 Compratore", value: `${user} (${user.id})`, inline: false },
+            { name: "📦 Prodotto", value: product.name, inline: true },
+            { name: "💰 Importo", value: euros(product.price), inline: true },
+            { name: "🎮 Username Roblox Compratore", value: robloxUser, inline: false },
+            { name: "💳 Saldo Aggiornato", value: euros((await getAccount(sellerId, guildId)).balance), inline: true }
+          )
+          .setTimestamp();
+        await seller.send({ embeds: [sellerEmbed] }).catch(() => {});
+      }
+
+      // DM al postino
+      const postino = await client.users.fetch(user.id).catch(() => null);
+      if (postino) {
+        const postinoEmbed = new EmbedBuilder()
+          .setColor(0xFF4500)
+          .setTitle("📬 Nuovo Pacco da Consegnare!")
+          .addFields(
+            { name: "👤 Destinatario", value: `${user}`, inline: false },
+            { name: "🎮 Username Roblox", value: robloxUser, inline: false },
+            { name: "📦 Prodotto", value: product.name, inline: true },
+            { name: "🏪 Negozio", value: getShopName(product.shop_key), inline: true }
+          )
+          .setDescription("Consegna il pacco al destinatario mantenendo l'RP!")
+          .setTimestamp();
+        
+        const guild = await client.guilds.fetch(guildId).catch(() => null);
+        if (guild) {
+          const postiniRole = guild.roles.cache.get(POSTINO_ROLE_ID);
+          if (postiniRole) {
+            const postiniMembers = postiniRole.members;
+            for (const [_, member] of postiniMembers) {
+              await member.user.send({ embeds: [postinoEmbed] }).catch(() => {});
+            }
+          }
+        }
+      }
+
+      // DM al compratore con istruzioni RP
+      const buyerEmbed = new EmbedBuilder()
+        .setColor(0x9B59B6)
+        .setTitle("📬 Il Tuo Pacco è in Arrivo!")
+        .addFields(
+          { name: "📦 Prodotto", value: product.name, inline: true },
+          { name: "💰 Importo Pagato", value: euros(product.price), inline: true },
+          { name: "🏪 Negozio", value: getShopName(product.shop_key), inline: false }
+        )
+        .setDescription("**Stai in RP!** Il postino arriverà presto a consegnarti il tuo pacco. Sii il più realistico possibile durante l'interazione!")
+        .setTimestamp();
+
+      await user.send({ embeds: [buyerEmbed] }).catch(() => {});
+
+    } catch (error) {
+      console.error("Errore nell'acquisto:", error);
+      return interaction.editReply({ embeds: [err(`Errore durante l'acquisto: ${error.message}`)] });
+    }
   }
 }
 
@@ -711,8 +1088,14 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       await handleCommand(interaction);
     }
+    if (interaction.isStringSelectMenu()) {
+      await handleSelectMenu(interaction);
+    }
     if (interaction.isButton()) {
       await handleButtonInteraction(interaction);
+    }
+    if (interaction.isModalSubmit()) {
+      await handleModalSubmit(interaction);
     }
   } catch (e) {
     console.error(e);
