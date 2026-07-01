@@ -13,9 +13,9 @@ const dbUrl = process.env.DATABASE_URL;
 const STAFF_ROLE_ID = "1504115375577497600";
 const CONTACT_USER_ID = "1141049314433573044";
 const POSTINO_ROLE_ID = "1515749955242037460";
-const CONCESSIONARIO_ROLE_ID = "1514961491433099386";
+const CONCESSIONARIO_ROLE_ID = "1514960724626116721";
 const DEFAULT_ROLE_SALARIES = {
-  "1514961491433099386": 150,
+  "1514960724626116721": 150,
   "1514960724626116721": 100,
   "1512153845373993001": 200,
   "1512029409211715715": 200,
@@ -445,7 +445,7 @@ async function handleCommand(interaction) {
       .addFields(
         { name: "👤 Mittente", value: user.toString(), inline: true },
         { name: "🎯 Destinatario", value: target.toString(), inline: true },
-        { name: "�� Importo", value: euros(amountInCents), inline: false },
+        { name: "💰 Importo", value: euros(amountInCents), inline: false },
         { name: "📝 Motivo", value: motivo, inline: false }
       )
       .setTimestamp();
