@@ -1,37 +1,104 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
 const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
-const { createCanvas, loadImage } = require("canvas");
-const fs = require("fs");
 const path = require("path");
-
+const { createCanvas, loadImage, registerFont } = require("canvas");
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => { res.writeHead(200); res.end("Bot online!"); }).listen(PORT, () => {
   console.log(`Health check su porta ${PORT}`);
 });
-
 const token = process.env.DISCORD_BOT_TOKEN;
 const dbUrl = process.env.DATABASE_URL;
 const STAFF_ROLE_ID = "1504115375577497600";
-const CONCESSIONARIO_ROLE_ID = "1514960724626116721";
-const STIPENDIO = 1500;
-
+const CONTACT_USER_ID = "1141049314433573044";
+const POSTINO_ROLE_ID = "1515749955242037460";
+const CONCESSIONARIO_ROLE_ID = "1514961491433099386";
+const DEFAULT_ROLE_SALARIES = {
+  "1514961491433099386": 150,
+  "1514960724626116721": 100,
+  "1512153845373993001": 200,
+  "1512029409211715715": 200,
+  "1504115591676559533": 250,
+  "1504115627844042905": 100,
+  "1504115690116874311": 100,
+  "1504115728859529371": 150,
+  "1504115619291730041": 100,
+};
+const SHOP_CATALOG = [
+  { name: "Telefonia", value: "telefonia" },
+  { name: "Elettronica", value: "elettronica" },
+  { name: "Supermercato", value: "supermercato" },
+  { name: "Farmacia", value: "farmacia" },
+  { name: "Abbigliamento", value: "abbigliamento" },
+  { name: "Gioielleria", value: "gioielleria" },
+  { name: "Concessionaria", value: "concessionaria" },
+  { name: "Garage e Ricambi", value: "garage" },
+  { name: "Benzinaio", value: "benzinaio" },
+  { name: "Immobiliare", value: "immobiliare" },
+  { name: "Arredamento", value: "arredamento" },
+  { name: "Ferramenta", value: "ferramenta" },
+  { name: "Ristorante", value: "ristorante" },
+  { name: "Fast Food", value: "fast_food" },
+  { name: "Pizzeria", value: "pizzeria" },
+  { name: "Bar", value: "bar" },
+  { name: "Gelateria", value: "gelateria" },
+  { name: "Panetteria", value: "panetteria" },
+  { name: "Animali", value: "animali" },
+  { name: "Ospedale", value: "ospedale" },
+  { name: "Parrucchiere", value: "parrucchiere" },
+];
+const CARD_FONT_FAMILY = "ChicagoCardSans";
+const salaryCache = new Map();
 if (!token) { console.error("DISCORD_BOT_TOKEN mancante"); process.exit(1); }
 if (!dbUrl) { console.error("DATABASE_URL mancante"); process.exit(1); }
-
 const pool = new Pool({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
-
 async function query(sql, params = []) {
   const client = await pool.connect();
   try { return await client.query(sql, params); }
   finally { client.release(); }
 }
-
 function hashPin(pin) {
   return crypto.createHash("sha256").update(String(pin)).digest("hex");
 }
-
+function getShopName(shopKey) {
+  return SHOP_CATALOG.find(shop => shop.value === shopKey)?.name || shopKey;
+}
+function isImageAttachment(attachment) {
+  if (!attachment) return false;
+  if (attachment.contentType?.startsWith("image/")) return true;
+  return /\.(png|jpe?g|gif|webp)$/i.test(attachment.url || "");
+}
+function shorten(text, max = 90) {
+  const value = String(text ?? "").trim();
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+function getPinEncryptionKey() {
+  const secret = process.env.PIN_ENCRYPTION_SECRET || token;
+  return crypto.createHash("sha256").update(secret).digest();
+}
+function encryptPin(pin) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-cbc", getPinEncryptionKey(), iv);
+  let enc = cipher.update(String(pin), "utf8", "hex");
+  enc += cipher.final("hex");
+  return `${iv.toString("hex")}:${enc}`;
+}
+function decryptPin(pinEnc) {
+  if (!pinEnc) return null;
+  const [ivHex, enc] = pinEnc.split(":");
+  const iv = Buffer.from(ivHex, "hex");
+  const decipher = crypto.createDecipheriv("aes-256-cbc", getPinEncryptionKey(), iv);
+  let dec = decipher.update(enc, "hex", "utf8");
+  dec += decipher.final("utf8");
+  return dec;
+}
+function parsePrice(priceStr) {
+  if (typeof priceStr === "number") return Math.round(priceStr * 100);
+  const normalized = String(priceStr).replace(",", ".");
+  const parsed = parseFloat(normalized);
+  return Math.round(parsed * 100);
+}
 async function setupDb() {
   await query(`CREATE TABLE IF NOT EXISTS bank_accounts (
     id SERIAL PRIMARY KEY,
@@ -59,256 +126,266 @@ async function setupDb() {
     guild_id TEXT NOT NULL,
     nome TEXT NOT NULL,
     cognome TEXT NOT NULL,
+    pin_enc TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(user_id, guild_id)
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS role_salaries (
+    id SERIAL PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    role_id TEXT NOT NULL,
+    amount BIGINT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, role_id)
+  )`);
+  await query(`CREATE TABLE IF NOT EXISTS products (
+    id SERIAL PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    creator_user_id TEXT NOT NULL,
+    shop_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    price BIGINT NOT NULL,
+    image_url TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
   )`);
   await query(`CREATE TABLE IF NOT EXISTS houses (
     id SERIAL PRIMARY KEY,
     guild_id TEXT NOT NULL,
-    nome TEXT NOT NULL,
-    prezzo BIGINT NOT NULL,
-    proprietario_id TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-  )`);
-  await query(`CREATE TABLE IF NOT EXISTS house_requests (
-    id SERIAL PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    guild_id TEXT NOT NULL,
-    house_id INT REFERENCES houses(id) ON DELETE CASCADE,
-    status TEXT DEFAULT 'pending',
+    creator_user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    price BIGINT NOT NULL,
+    image_url TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
   )`);
   await query(`CREATE TABLE IF NOT EXISTS cars (
     id SERIAL PRIMARY KEY,
     guild_id TEXT NOT NULL,
-    nome TEXT NOT NULL,
-    prezzo BIGINT NOT NULL,
-    proprietario_id TEXT,
-    immagine_url TEXT,
+    creator_user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    price BIGINT NOT NULL,
+    image_url TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
   )`);
-  await query(`CREATE TABLE IF NOT EXISTS car_requests (
+  await query(`CREATE TABLE IF NOT EXISTS job_requests (
     id SERIAL PRIMARY KEY,
     user_id TEXT NOT NULL,
     guild_id TEXT NOT NULL,
-    car_id INT REFERENCES cars(id) ON DELETE CASCADE,
+    position TEXT NOT NULL,
+    message_id TEXT,
     status TEXT DEFAULT 'pending',
     created_at TIMESTAMPTZ DEFAULT NOW()
   )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_products_guild_shop ON products(guild_id, shop_key)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_products_creator ON products(guild_id, creator_user_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_houses_guild ON houses(guild_id)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_cars_guild ON cars(guild_id)`);
+  await query(`ALTER TABLE cards ADD COLUMN IF NOT EXISTS pin_enc TEXT`).catch(() => {});
   console.log("Database pronto.");
 }
-
+async function loadSalaries(guildId) {
+  const { rows } = await query("SELECT role_id, amount FROM role_salaries WHERE guild_id=$1", [guildId]);
+  const map = new Map();
+  for (const r of rows) map.set(r.role_id, Number(r.amount));
+  salaryCache.set(guildId, map);
+  return map;
+}
+async function getSalaries(guildId) {
+  if (salaryCache.has(guildId)) return salaryCache.get(guildId);
+  return await loadSalaries(guildId);
+}
+async function seedDefaultSalaries(guildId) {
+  const { rows } = await query("SELECT COUNT(*)::int AS n FROM role_salaries WHERE guild_id=$1", [guildId]);
+  if (rows[0].n > 0) return;
+  for (const [roleId, amount] of Object.entries(DEFAULT_ROLE_SALARIES)) {
+    await query(
+      "INSERT INTO role_salaries(guild_id, role_id, amount) VALUES($1,$2,$3) ON CONFLICT (guild_id, role_id) DO NOTHING",
+      [guildId, roleId, amount]
+    );
+  }
+  await loadSalaries(guildId);
+  console.log(`Stipendi di default inseriti per la guild ${guildId}`);
+}
 async function getAccount(userId, guildId) {
   const { rows } = await query("SELECT * FROM bank_accounts WHERE user_id=$1 AND guild_id=$2", [userId, guildId]);
   return rows[0] || null;
 }
-
 async function getCard(userId, guildId) {
   const { rows } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [userId, guildId]);
   return rows[0] || null;
 }
-
-function euros(n) { return `**${Number(n).toLocaleString("it-IT")} €**`; }
-function err(msg) { return new EmbedBuilder().setColor(0xe74c3c).setTitle("❌ Errore").setDescription(msg); }
-
-// Funzione per generare l'immagine della carta
-async function generateCardImage(user, member, nome, cognome, createdAt) {
-  try {
-    const possiblePaths = [
-      path.join(__dirname, "chicago-bg.jpg"),
-      path.join(__dirname, "..", "chicago-bg.jpg"),
-      "/opt/render/project/src/chicago-bg.jpg",
-      "/opt/render/project/chicago-bg.jpg",
-    ];
-
-    let bgPath = null;
-    for (const p of possiblePaths) {
-      if (fs.existsSync(p)) {
-        bgPath = p;
-        console.log(`Background trovato in: ${bgPath}`);
-        break;
-      }
-    }
-
-    const canvas = createCanvas(800, 500);
-    const ctx = canvas.getContext("2d");
-
-    if (bgPath && fs.existsSync(bgPath)) {
-      try {
-        const bgImage = await loadImage(bgPath);
-        ctx.drawImage(bgImage, 0, 0, 800, 500);
-        ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
-        ctx.fillRect(0, 0, 800, 500);
-      } catch (imgErr) {
-        console.warn("Background non trovato, uso colore solido:", imgErr.message);
-        ctx.fillStyle = "#1a1a1a";
-        ctx.fillRect(0, 0, 800, 500);
-      }
-    } else {
-      ctx.fillStyle = "#1a1a1a";
-      ctx.fillRect(0, 0, 800, 500);
-    }
-
-    ctx.strokeStyle = "#D4AF37";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(15, 15, 770, 470);
-
-    const avatarUrl = user.displayAvatarURL({ extension: "png", size: 256 });
-    const avatarImage = await loadImage(avatarUrl);
-
-    const avatarX = 680;
-    const avatarY = 150;
-    const avatarRadius = 90;
-
-    ctx.beginPath();
-    ctx.arc(avatarX, avatarY, avatarRadius, 0, Math.PI * 2);
-    ctx.fillStyle = "#D4AF37";
-    ctx.fill();
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = "#D4AF37";
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(avatarX, avatarY, avatarRadius - 4, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.drawImage(avatarImage, avatarX - avatarRadius + 4, avatarY - avatarRadius + 4, (avatarRadius - 4) * 2, (avatarRadius - 4) * 2);
-    ctx.restore();
-
-    ctx.fillStyle = "#FFFFFF";
-    ctx.font = "bold 32px Arial";
-    ctx.fillText(nome, 40, 120);
-
-    ctx.font = "bold 32px Arial";
-    ctx.fillStyle = "#D4AF37";
-    ctx.fillText(cognome, 40, 170);
-
-    const dataCreazione = new Date(createdAt).toLocaleDateString("it-IT");
-    ctx.font = "16px Arial";
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillText(`Data apertura: ${dataCreazione}`, 40, 250);
-
-    ctx.font = "16px Arial";
-    ctx.fillStyle = "#D4AF37";
-    ctx.fillText(`@${user.username}`, 40, 280);
-
-    ctx.font = "20px Arial";
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillText("PIN: ****", 40, 350);
-
-    ctx.font = "bold 18px Arial";
-    ctx.fillStyle = "#D4AF37";
-    ctx.fillText("Chicago Economy Bank", 40, 450);
-
-    return canvas.toBuffer("image/png");
-  } catch (error) {
-    console.error("Errore nella generazione della carta:", error);
-    throw error;
-  }
+async function getProduct(productId, guildId) {
+  const { rows } = await query("SELECT * FROM products WHERE id=$1 AND guild_id=$2", [productId, guildId]);
+  return rows[0] || null;
 }
-
-async function pagareStipendiGuild(client) {
-  const now = new Date();
-  if (now.getDate() !== 1) return;
-  const mese = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+async function getHouse(houseId, guildId) {
+  const { rows } = await query("SELECT * FROM houses WHERE id=$1 AND guild_id=$2", [houseId, guildId]);
+  return rows[0] || null;
+}
+async function getCar(carId, guildId) {
+  const { rows } = await query("SELECT * FROM cars WHERE id=$1 AND guild_id=$2", [carId, guildId]);
+  return rows[0] || null;
+}
+async function getShopProductCounts(guildId) {
   const { rows } = await query(
-    "SELECT * FROM bank_accounts WHERE (salary_paid_month IS NULL OR salary_paid_month != $1)",
-    [mese]
+    "SELECT shop_key, COUNT(*)::int AS count FROM products WHERE guild_id=$1 GROUP BY shop_key ORDER BY shop_key",
+    [guildId]
   );
-  for (const acc of rows) {
-    await query(
-      "UPDATE bank_accounts SET balance=balance+$1, salary_paid_month=$2 WHERE user_id=$3 AND guild_id=$4",
-      [STIPENDIO, mese, acc.user_id, acc.guild_id]
+  return rows;
+}
+async function listProductsForShop(guildId, shopKey) {
+  const { rows } = await query(
+    "SELECT * FROM products WHERE guild_id=$1 AND shop_key=$2 ORDER BY created_at DESC, id DESC LIMIT 25",
+    [guildId, shopKey]
+  );
+  return rows;
+}
+async function listHouses(guildId) {
+  const { rows } = await query(
+    "SELECT * FROM houses WHERE guild_id=$1 ORDER BY created_at DESC LIMIT 25",
+    [guildId]
+  );
+  return rows;
+}
+async function listCars(guildId) {
+  const { rows } = await query(
+    "SELECT * FROM cars WHERE guild_id=$1 ORDER BY created_at DESC LIMIT 25",
+    [guildId]
+  );
+  return rows;
+}
+async function completeOnlinePurchase({ buyerId, sellerId, guildId, amount, productName, productId }) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const buyerResult = await client.query(
+      "SELECT * FROM bank_accounts WHERE user_id=$1 AND guild_id=$2 FOR UPDATE",
+      [buyerId, guildId]
     );
-    await query(
-      "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES(NULL,$1,$2,$3,'Stipendio mensile automatico','stipendio')",
-      [acc.user_id, acc.guild_id, STIPENDIO]
+    const sellerResult = await client.query(
+      "SELECT * FROM bank_accounts WHERE user_id=$1 AND guild_id=$2 FOR UPDATE",
+      [sellerId, guildId]
     );
-    try {
-      const user = await client.users.fetch(acc.user_id);
-      await user.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-        .setTitle("💰 Stipendio Accreditato!")
-        .setDescription(`Il tuo stipendio mensile di ${euros(STIPENDIO)} è stato accreditato sul tuo conto bancario! 🎉`)
-        .setTimestamp()] });
-    } catch {}
+    const buyer = buyerResult.rows[0];
+    const seller = sellerResult.rows[0];
+    if (!buyer) throw new Error("BUYER_ACCOUNT_MISSING");
+    if (!seller) throw new Error("SELLER_ACCOUNT_MISSING");
+    if (Number(buyer.balance) < amount) throw new Error("INSUFFICIENT_FUNDS");
+    await client.query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [amount, buyerId, guildId]);
+    await client.query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [amount, sellerId, guildId]);
+    await client.query(
+      "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'acquisto_online')",
+      [buyerId, sellerId, guildId, amount, `Acquisto online #${productId}: ${productName}`]
+    );
+    await client.query("COMMIT");
+    return { buyerBalance: Number(buyer.balance) - amount, sellerBalance: Number(seller.balance) + amount };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
   }
 }
-
+function euros(n) { 
+  const centesimi = Number(n);
+  const euro = Math.floor(centesimi / 100);
+  const cent = centesimi % 100;
+  if (cent === 0) return `**${euro.toLocaleString("it-IT")} €**`;
+  return `**${euro},${String(cent).padStart(2, "0")} €**`;
+}
+function err(msg) { return new EmbedBuilder().setColor(0xe74c3c).setTitle("❌ Errore").setDescription(msg); }
+function calcolaStipendio(member, salaries) {
+  let totale = 0;
+  const ruoli = [];
+  for (const [roleId, importo] of salaries.entries()) {
+    if (member.roles.cache.has(roleId)) {
+      totale += importo;
+      ruoli.push({ roleId, importo });
+    }
+  }
+  return { totale, ruoli };
+}
 const commands = [
-  new SlashCommandBuilder().setName("apriconto").setDescription("Apri un conto bancario per ricevere lo stipendio mensile"),
-  new SlashCommandBuilder().setName("creapin").setDescription("Crea il PIN del tuo conto bancario (4 cifre)")
+  new SlashCommandBuilder()
+    .setName("apriconto")
+    .setDescription("Apri un conto bancario per ricevere lo stipendio mensile"),
+  new SlashCommandBuilder()
+    .setName("creapin")
+    .setDescription("Crea il PIN del tuo conto bancario (4 cifre)")
     .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
-  new SlashCommandBuilder().setName("modificapin").setDescription("Modifica il PIN del tuo conto bancario")
+  new SlashCommandBuilder()
+    .setName("modificapin")
+    .setDescription("Modifica il PIN del tuo conto bancario")
     .addIntegerOption(o => o.setName("vecchiopin").setDescription("Il PIN attuale").setRequired(true).setMinValue(1000).setMaxValue(9999))
     .addIntegerOption(o => o.setName("nuovopin").setDescription("Il nuovo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
-  new SlashCommandBuilder().setName("paga").setDescription("Paga un utente con soldi dal tuo conto bancario")
+  new SlashCommandBuilder()
+    .setName("paga")
+    .setDescription("Paga un utente con soldi dal tuo conto bancario")
     .addUserOption(o => o.setName("utente").setDescription("Chi vuoi pagare").setRequired(true))
     .addIntegerOption(o => o.setName("importo").setDescription("Quanti euro inviare").setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName("motivo").setDescription("Motivo del pagamento").setRequired(true))
     .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN per confermare").setRequired(true).setMinValue(1000).setMaxValue(9999)),
-  new SlashCommandBuilder().setName("sequestra").setDescription("[SOLO STAFF] Sequestra soldi da un utente")
-    .addUserOption(o => o.setName("utente").setDescription("Utente a cui sequestrare i soldi").setRequired(true))
-    .addIntegerOption(o => o.setName("importo").setDescription("Importo da sequestrare").setRequired(true).setMinValue(1))
-    .addStringOption(o => o.setName("motivo").setDescription("Motivo del sequestro").setRequired(false)),
-  new SlashCommandBuilder().setName("saldo").setDescription("Controlla il saldo del tuo conto bancario"),
-  new SlashCommandBuilder().setName("tassa").setDescription("[SOLO STAFF] Applica una tassa a tutti i conti bancari del server")
-    .addIntegerOption(o => o.setName("percentuale").setDescription("Percentuale da tassare (1-50%)").setRequired(true).setMinValue(1).setMaxValue(50))
-    .addStringOption(o => o.setName("motivo").setDescription("Motivo della tassa").setRequired(false)),
-  new SlashCommandBuilder().setName("creacarta").setDescription("Crea la tua carta Chicago Economy Bank")
-    .addStringOption(o => o.setName("nome").setDescription("Il tuo nome").setRequired(true))
-    .addStringOption(o => o.setName("cognome").setDescription("Il tuo cognome").setRequired(true))
-    .addIntegerOption(o => o.setName("pin").setDescription("Il tuo PIN a 4 cifre").setRequired(true).setMinValue(1000).setMaxValue(9999)),
-  new SlashCommandBuilder().setName("case").setDescription("Visualizza le case disponibili e richiedi una casa"),
-  new SlashCommandBuilder().setName("aggiungi_casa").setDescription("[SOLO STAFF] Aggiungi una casa in vendita")
+  new SlashCommandBuilder()
+    .setName("saldo")
+    .setDescription("Controlla il saldo del tuo conto bancario"),
+  new SlashCommandBuilder()
+    .setName("case")
+    .setDescription("Visualizza le case disponibili"),
+  new SlashCommandBuilder()
+    .setName("auto")
+    .setDescription("Visualizza le auto disponibili"),
+  new SlashCommandBuilder()
+    .setName("creacase")
+    .setDescription("[SOLO STAFF] Crea una casa in vendita")
     .addStringOption(o => o.setName("nome").setDescription("Nome della casa").setRequired(true))
-    .addIntegerOption(o => o.setName("prezzo").setDescription("Prezzo della casa").setRequired(true).setMinValue(1)),
-  new SlashCommandBuilder().setName("auto").setDescription("Visualizza le auto disponibili e richiedi un'auto"),
-  new SlashCommandBuilder().setName("aggiungi_auto").setDescription("[SOLO CONCESSIONARIO] Aggiungi un'auto in vendita")
+    .addStringOption(o => o.setName("prezzo").setDescription("Prezzo in euro").setRequired(true))
+    .addAttachmentOption(o => o.setName("immagine").setDescription("Foto della casa").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("rimuovi-casa")
+    .setDescription("[SOLO STAFF] Rimuove una casa")
+    .addIntegerOption(o => o.setName("id").setDescription("ID della casa").setRequired(true).setMinValue(1)),
+  new SlashCommandBuilder()
+    .setName("creauto")
+    .setDescription("[SOLO CONCESSIONARIO] Crea un'auto in vendita")
     .addStringOption(o => o.setName("nome").setDescription("Nome dell'auto").setRequired(true))
-    .addIntegerOption(o => o.setName("prezzo").setDescription("Prezzo dell'auto").setRequired(true).setMinValue(1))
-    .addStringOption(o => o.setName("immagine_url").setDescription("URL dell'immagine dell'auto").setRequired(false)),
-  new SlashCommandBuilder().setName("richieste_casa").setDescription("[SOLO STAFF] Visualizza le richieste di case in sospeso"),
-  new SlashCommandBuilder().setName("richieste_auto").setDescription("[SOLO CONCESSIONARIO] Visualizza le richieste di auto in sospeso"),
+    .addStringOption(o => o.setName("prezzo").setDescription("Prezzo in euro").setRequired(true))
+    .addAttachmentOption(o => o.setName("immagine").setDescription("Foto dell'auto").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("rimuovi-auto")
+    .setDescription("[SOLO CONCESSIONARIO] Rimuove un'auto")
+    .addIntegerOption(o => o.setName("id").setDescription("ID dell'auto").setRequired(true).setMinValue(1)),
+  new SlashCommandBuilder()
+    .setName("richiesta-lavoro")
+    .setDescription("Fai una richiesta di lavoro")
+    .addStringOption(o => o.setName("posizione").setDescription("Posizione lavorativa desiderata").setRequired(true)),
 ];
-
 async function handleCommand(interaction) {
   const { commandName, user, guildId, member } = interaction;
-  const ephemeral = ["creapin", "modificapin", "paga", "creacarta", "aggiungi_casa", "aggiungi_auto"].includes(commandName);
-  await interaction.deferReply({ ephemeral });
-
+  await interaction.deferReply({ ephemeral: false });
+  
   if (commandName === "apriconto") {
     const existing = await getAccount(user.id, guildId);
-    if (existing) return interaction.editReply({ embeds: [err("Hai già un conto bancario aperto!")] });
-    await query("INSERT INTO bank_accounts(user_id, guild_id, balance) VALUES($1, $2, 500)", [user.id, guildId]);
+    if (existing) {
+      return interaction.editReply({ embeds: [err("Hai già un conto bancario aperto!")] });
+    }
+    await query(
+      "INSERT INTO bank_accounts(user_id, guild_id, balance) VALUES($1, $2, 50000)",
+      [user.id, guildId]
+    );
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("🏦 Conto Bancario Aperto!")
-      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**! 🎉\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile!`)
+      .setDescription(`Benvenuto ${user}! Il tuo conto bancario è stato aperto con successo con un bonus di **500 €**!\n\n> Usa **/creapin** per impostare il tuo PIN e iniziare a ricevere lo stipendio mensile!`)
       .setTimestamp()] });
   }
 
   if (commandName === "creapin") {
     const acc = await getAccount(user.id, guildId);
-    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-    if (acc.pin_hash) return interaction.editReply({ embeds: [err("Hai già un PIN impostato. Usa **/modificapin** per cambiarlo.")] });
+    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**")] });
+    if (acc.pin_hash) return interaction.editReply({ embeds: [err("Hai già un PIN impostato. Usa **/modificapin** per cambiarlo")] });
     const pin = interaction.options.getInteger("pin", true);
     await query("UPDATE bank_accounts SET pin_hash=$1 WHERE user_id=$2 AND guild_id=$3", [hashPin(pin), user.id, guildId]);
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
       .setTitle("🔐 PIN Creato!")
-      .setDescription("Il PIN del tuo conto bancario è stato impostato con successo.\n\n✅ Ora riceverai lo **stipendio mensile** il 1° di ogni mese!")
-      .setTimestamp()] });
-  }
-
-  if (commandName === "modificapin") {
-    const acc = await getAccount(user.id, guildId);
-    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-    if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai ancora un PIN. Usa **/creapin** prima.")] });
-    const vecchio = interaction.options.getInteger("vecchiopin", true);
-    const nuovo = interaction.options.getInteger("nuovopin", true);
-    if (hashPin(vecchio) !== acc.pin_hash) return interaction.editReply({ embeds: [err("PIN attuale errato!")] });
-    if (vecchio === nuovo) return interaction.editReply({ embeds: [err("Il nuovo PIN deve essere diverso da quello attuale.")] });
-    await query("UPDATE bank_accounts SET pin_hash=$1 WHERE user_id=$2 AND guild_id=$3", [hashPin(nuovo), user.id, guildId]);
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("🔐 PIN Modificato!")
-      .setDescription("Il tuo PIN è stato aggiornato con successo.")
+      .setDescription("Il PIN del tuo conto bancario è stato impostato con successo.\n✅ Ora riceverai lo **stipendio mensile** il 1° di ogni mese!")
       .setTimestamp()] });
   }
 
@@ -317,277 +394,316 @@ async function handleCommand(interaction) {
     const importo = interaction.options.getInteger("importo", true);
     const motivo = interaction.options.getString("motivo", true);
     const pin = interaction.options.getInteger("pin", true);
-    if (target.id === user.id) return interaction.editReply({ embeds: [err("Non puoi pagare te stesso.")] });
-    if (target.bot) return interaction.editReply({ embeds: [err("Non puoi pagare un bot.")] });
+    
+    if (target.id === user.id) return interaction.editReply({ embeds: [err("Non puoi pagare te stesso")] });
+    if (target.bot) return interaction.editReply({ embeds: [err("Non puoi pagare un bot")] });
+    
     const mittente = await getAccount(user.id, guildId);
-    if (!mittente) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-    if (!mittente.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
-    if (hashPin(pin) !== mittente.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Transazione annullata.")] });
-    if (mittente.balance < importo) return interaction.editReply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(mittente.balance)} sul conto.`)] });
+    if (!mittente) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**")] });
+    if (!mittente.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima")] });
+    if (hashPin(pin) !== mittente.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato! Transazione annullata")] });
+    if (mittente.balance < importo * 100) return interaction.editReply({ embeds: [err(`Saldo insufficiente. Hai solo ${euros(mittente.balance)}`)] });
+    
     const destinatario = await getAccount(target.id, guildId);
-    if (!destinatario) return interaction.editReply({ embeds: [err(`${target.displayName} non ha un conto bancario.`)] });
-    await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [importo, user.id, guildId]);
-    await query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [importo, target.id, guildId]);
-    await query("INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'pagamento')", [user.id, target.id, guildId, importo, motivo]);
-    try {
-      await target.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-        .setTitle("💸 Hai Ricevuto un Pagamento!")
-        .setDescription(`${user.tag} ti ha inviato ${euros(importo)}`)
-        .addFields({ name: "Motivo", value: motivo })
-        .setTimestamp()] });
-    } catch {}
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("✅ Pagamento Effettuato!")
-      .setDescription(`Hai inviato ${euros(importo)} a ${target}`)
+    if (!destinatario) return interaction.editReply({ embeds: [err(`${target.displayName} non ha un conto bancario`)] });
+    
+    const amountInCents = importo * 100;
+    
+    // Embed di conferma
+    const confirmEmbed = new EmbedBuilder()
+      .setColor(0x3498db)
+      .setTitle("💳 Conferma Pagamento")
+      .setDescription(`Stai per inviare denaro a ${target}`)
       .addFields(
-        { name: "Motivo", value: motivo },
-        { name: "Tuo saldo rimanente", value: euros(mittente.balance - importo) }
-      ).setTimestamp()] });
-  }
-
-  if (commandName === "sequestra") {
-    const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
-    if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi per usare questo comando. Richiede il ruolo Staff.")] });
-    const target = interaction.options.getUser("utente", true);
-    const importo = interaction.options.getInteger("importo", true);
-    const motivo = interaction.options.getString("motivo") ?? "Nessun motivo specificato";
-    const vittima = await getAccount(target.id, guildId);
-    if (!vittima) return interaction.editReply({ embeds: [err(`${target.displayName} non ha un conto bancario.`)] });
-    const sequestrabile = Math.min(importo, vittima.balance);
-    if (sequestrabile <= 0) return interaction.editReply({ embeds: [err(`${target.displayName} non ha fondi sul conto.`)] });
-    await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [sequestrabile, target.id, guildId]);
-    await query("INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,NULL,$2,$3,$4,'sequestro')", [target.id, guildId, sequestrabile, motivo]);
-    try {
-      await target.send({ embeds: [new EmbedBuilder().setColor(0xe74c3c)
-        .setTitle("🚨 Sequestro Fondi")
-        .setDescription(`${euros(sequestrabile)} sono stati sequestrati dal tuo conto dal personale del server.`)
-        .addFields({ name: "Motivo", value: motivo })
-        .setTimestamp()] });
-    } catch {}
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe67e22)
-      .setTitle("🚨 Sequestro Effettuato")
-      .setDescription(`Sono stati sequestrati ${euros(sequestrabile)} dal conto di ${target}`)
-      .addFields({ name: "Motivo", value: motivo }, { name: "Saldo residuo", value: euros(vittima.balance - sequestrabile) })
-      .setTimestamp()] });
-  }
-
-  if (commandName === "tassa") {
-    const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
-    if (!hasRole) return interaction.editReply({ embeds: [err("Non hai i permessi. Richiede il ruolo Staff.")] });
-    const percentuale = interaction.options.getInteger("percentuale", true);
-    const motivo = interaction.options.getString("motivo") ?? "Tassa governativa";
-    const { rows } = await query("SELECT * FROM bank_accounts WHERE guild_id=$1 AND balance > 0", [guildId]);
-    if (!rows.length) return interaction.editReply({ embeds: [err("Nessun conto bancario con fondi trovato.")] });
-    let totaleRaccolto = 0;
-    for (const acc of rows) {
-      const tassa = Math.floor(acc.balance * percentuale / 100);
-      if (tassa <= 0) continue;
-      await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [tassa, acc.user_id, guildId]);
-      await query("INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,NULL,$2,$3,$4,'tassa')", [acc.user_id, guildId, tassa, motivo]);
-      totaleRaccolto += tassa;
-    }
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xe67e22)
-      .setTitle("🏛️ Tassa Applicata!")
-      .setDescription(`Tassa del **${percentuale}%** applicata a **${rows.length}** conti bancari.`)
-      .addFields(
-        { name: "Totale raccolto", value: euros(totaleRaccolto), inline: true },
-        { name: "Conti tassati", value: `${rows.length}`, inline: true },
-        { name: "Motivo", value: motivo }
-      ).setTimestamp()] });
-  }
-
-  if (commandName === "creacarta") {
-    const nome = interaction.options.getString("nome", true).trim();
-    const cognome = interaction.options.getString("cognome", true).trim();
-    const pin = interaction.options.getInteger("pin", true);
-    const acc = await getAccount(user.id, guildId);
-
-    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa prima **/apriconto**.")] });
-    if (!acc.pin_hash) return interaction.editReply({ embeds: [err("Non hai un PIN impostato. Usa **/creapin** prima.")] });
-    if (hashPin(pin) !== acc.pin_hash) return interaction.editReply({ embeds: [err("❌ PIN errato!")] });
-
-    const { rows: existing } = await query("SELECT * FROM cards WHERE user_id=$1 AND guild_id=$2", [user.id, guildId]);
-
-    if (existing.length) {
-      await query("UPDATE cards SET nome=$1, cognome=$2 WHERE user_id=$3 AND guild_id=$4", [nome, cognome, user.id, guildId]);
-    } else {
-      await query("INSERT INTO cards(user_id,guild_id,nome,cognome) VALUES($1,$2,$3,$4)", [user.id, guildId, nome, cognome]);
-    }
-
-    await interaction.editReply({ content: "🎴 Generazione carta in corso..." });
-
-    try {
-      const imgBuffer = await generateCardImage(user, member, nome, cognome, acc.created_at);
-      const attachment = new AttachmentBuilder(imgBuffer, { name: "carta.png" });
-
-      const showDetailsButton = new ButtonBuilder()
-        .setCustomId(`mostra_dettagli_${user.id}`)
-        .setLabel("🔐 Mostra Dettagli")
-        .setStyle(ButtonStyle.Primary);
-
-      const row = new ActionRowBuilder().addComponents(showDetailsButton);
-
-      return interaction.editReply({
-        content: "",
-        embeds: [new EmbedBuilder().setColor(0xD4AF37)
-          .setTitle("💳 La Tua Carta Chicago Economy Bank")
-          .setDescription(`${user} la tua carta è pronta!`)
-          .setImage("attachment://carta.png")
-          .setTimestamp()],
-        files: [attachment],
-        components: [row]
-      });
-    } catch (error) {
-      console.error("Errore nella generazione della carta:", error);
-      return interaction.editReply({ embeds: [err("Errore nella generazione della carta. Riprova più tardi.")] });
-    }
+        { name: "👤 Mittente", value: user.toString(), inline: true },
+        { name: "🎯 Destinatario", value: target.toString(), inline: true },
+        { name: "💰 Importo", value: euros(amountInCents), inline: false },
+        { name: "📝 Motivo", value: motivo, inline: false }
+      )
+      .setTimestamp();
+    
+    const confirmButton = new ButtonBuilder()
+      .setCustomId(`confirm_pay_${target.id}_${amountInCents}`)
+      .setLabel("✅ Conferma")
+      .setStyle(ButtonStyle.Success);
+    
+    const cancelButton = new ButtonBuilder()
+      .setCustomId("cancel_pay")
+      .setLabel("❌ Annulla")
+      .setStyle(ButtonStyle.Danger);
+    
+    const row = new ActionRowBuilder().addComponents(confirmButton, cancelButton);
+    
+    await interaction.editReply({ embeds: [confirmEmbed], components: [row] });
+    
+    // Store transaction data
+    interaction.client.pendingTransactions = interaction.client.pendingTransactions || new Map();
+    interaction.client.pendingTransactions.set(`pay_${user.id}`, {
+      mittente: user.id,
+      destinatario: target.id,
+      amount: amountInCents,
+      motivo,
+      guildId
+    });
   }
 
   if (commandName === "saldo") {
     const acc = await getAccount(user.id, guildId);
-    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno.")] });
-    const pinStatus = acc.pin_hash ? "✅ PIN impostato" : "❌ PIN non impostato (usa /creapin)";
-    const prossimoStipendio = acc.pin_hash ? "✅ Attivo (1° del mese)" : "❌ Disattivato (imposta il PIN)";
+    if (!acc) return interaction.editReply({ embeds: [err("Non hai un conto bancario. Usa **/apriconto** per aprirne uno")] });
+    
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x3498db)
       .setTitle("🏦 Il Tuo Conto Bancario")
       .setThumbnail(user.displayAvatarURL())
       .addFields(
         { name: "💶 Saldo", value: euros(acc.balance), inline: true },
-        { name: "🔐 Sicurezza", value: pinStatus, inline: true },
-        { name: "💰 Stipendio", value: prossimoStipendio, inline: false }
-      ).setTimestamp()] });
+        { name: "🔐 PIN", value: acc.pin_hash ? "✅ Impostato" : "❌ Non impostato", inline: true }
+      )
+      .setTimestamp()] });
   }
 
   if (commandName === "case") {
-    const { rows: case_list } = await query("SELECT * FROM houses WHERE guild_id=$1", [guildId]);
-    if (!case_list.length) return interaction.editReply({ embeds: [err("Non ci sono case disponibili.")] });
-
-    const embed = new EmbedBuilder().setColor(0x3498db).setTitle("🏠 Case Disponibili");
-    case_list.forEach((h) => {
-      embed.addFields({ name: `${h.nome}`, value: `💰 ${euros(h.prezzo)}`, inline: true });
-    });
-
-    const buttons = case_list.map((h) => 
-      new ButtonBuilder()
-        .setCustomId(`richiedi_casa_${h.id}`)
-        .setLabel(`Richiedi ${h.nome}`)
-        .setStyle(ButtonStyle.Success)
-    );
-
-    const rows = [];
-    for (let i = 0; i < buttons.length; i += 5) {
-      rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+    const houses = await listHouses(guildId);
+    if (!houses.length) {
+      return interaction.editReply({ embeds: [err("Non ci sono case disponibili al momento")] });
     }
-
-    return interaction.editReply({ embeds: [embed], components: rows });
-  }
-
-  if (commandName === "aggiungi_casa") {
-    const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
-    if (!hasRole) return interaction.editReply({ embeds: [err("Solo lo Staff può aggiungere case!")] });
-    const nome = interaction.options.getString("nome", true);
-    const prezzo = interaction.options.getInteger("prezzo", true);
     
-    await query("INSERT INTO houses(guild_id, nome, prezzo, proprietario_id) VALUES($1, $2, $3, $4)", 
-      [guildId, nome, prezzo, user.id]);
+    const embed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setTitle("🏡 Case Disponibili")
+      .setDescription(houses.slice(0, 5).map(h => `#${h.id} • **${h.name}** - ${euros(h.price)}`).join("\n"));
     
-    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("🏠 Casa Aggiunta!")
-      .setDescription(`La casa **${nome}** è stata aggiunta a ${euros(prezzo)}`)
-      .setTimestamp()] });
+    if (houses.length > 5) {
+      const viewAll = new ButtonBuilder()
+        .setCustomId("view_all_houses")
+        .setLabel(`Vedi tutte (${houses.length})`)
+        .setStyle(ButtonStyle.Primary);
+      return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(viewAll)] });
+    }
+    
+    return interaction.editReply({ embeds: [embed] });
   }
 
   if (commandName === "auto") {
-    const { rows: auto_list } = await query("SELECT * FROM cars WHERE guild_id=$1", [guildId]);
-    if (!auto_list.length) return interaction.editReply({ embeds: [err("Non ci sono auto disponibili.")] });
-
-    const embed = new EmbedBuilder().setColor(0xff6b6b).setTitle("🚗 Auto Disponibili");
-    auto_list.forEach((c) => {
-      embed.addFields({ name: `${c.nome}`, value: `💰 ${euros(c.prezzo)}`, inline: true });
-    });
-
-    const buttons = auto_list.map((c) => 
-      new ButtonBuilder()
-        .setCustomId(`richiedi_auto_${c.id}`)
-        .setLabel(`Richiedi ${c.nome}`)
-        .setStyle(ButtonStyle.Danger)
-    );
-
-    const rows = [];
-    for (let i = 0; i < buttons.length; i += 5) {
-      rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+    const cars = await listCars(guildId);
+    if (!cars.length) {
+      return interaction.editReply({ embeds: [err("Non ci sono auto disponibili al momento")] });
     }
-
-    return interaction.editReply({ embeds: [embed], components: rows });
+    
+    const embed = new EmbedBuilder()
+      .setColor(0xFF4500)
+      .setTitle("🚗 Auto Disponibili")
+      .setDescription(cars.slice(0, 5).map(c => `#${c.id} • **${c.name}** - ${euros(c.price)}`).join("\n"));
+    
+    if (cars.length > 5) {
+      const viewAll = new ButtonBuilder()
+        .setCustomId("view_all_cars")
+        .setLabel(`Vedi tutte (${cars.length})`)
+        .setStyle(ButtonStyle.Primary);
+      return interaction.editReply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(viewAll)] });
+    }
+    
+    return interaction.editReply({ embeds: [embed] });
   }
 
-  if (commandName === "aggiungi_auto") {
-    const hasRole = member.roles?.cache?.has(CONCESSIONARIO_ROLE_ID);
-    if (!hasRole) return interaction.editReply({ embeds: [err("Solo il Concessionario può aggiungere auto!")] });
-    const nome = interaction.options.getString("nome", true);
-    const prezzo = interaction.options.getInteger("prezzo", true);
-    const imgUrl = interaction.options.getString("immagine_url");
+  if (commandName === "creacase") {
+    const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
+    if (!hasRole) return interaction.editReply({ embeds: [err("Solo lo STAFF può creare case")] });
     
-    await query("INSERT INTO cars(guild_id, nome, prezzo, proprietario_id, immagine_url) VALUES($1, $2, $3, $4, $5)", 
-      [guildId, nome, prezzo, user.id, imgUrl]);
+    const nome = interaction.options.getString("nome", true);
+    const prezzoStr = interaction.options.getString("prezzo", true);
+    const prezzo = parsePrice(prezzoStr);
+    const immagine = interaction.options.getAttachment("immagine", true);
+    
+    if (!isImageAttachment(immagine)) return interaction.editReply({ embeds: [err("L'allegato deve essere un'immagine")] });
+    
+    const { rows } = await query(
+      "INSERT INTO houses(guild_id, creator_user_id, name, price, image_url) VALUES($1,$2,$3,$4,$5) RETURNING *",
+      [guildId, user.id, nome, prezzo, immagine.url]
+    );
     
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-      .setTitle("🚗 Auto Aggiunta!")
-      .setDescription(`L'auto **${nome}** è stata aggiunta a ${euros(prezzo)}`)
-      .setTimestamp()] });
+      .setTitle("🏡 Casa Creata")
+      .addFields(
+        { name: "Nome", value: nome, inline: true },
+        { name: "Prezzo", value: euros(prezzo), inline: true },
+        { name: "ID", value: `#${rows[0].id}`, inline: true }
+      )
+      .setImage(immagine.url)] });
   }
 
-  if (commandName === "richieste_casa") {
+  if (commandName === "rimuovi-casa") {
     const hasRole = member.roles?.cache?.has(STAFF_ROLE_ID);
-    if (!hasRole) return interaction.editReply({ embeds: [err("Solo lo Staff può vedere le richieste di case!")] });
-    const { rows: requests } = await query(`
-      SELECT hr.*, h.nome as casa_nome, h.prezzo
-      FROM house_requests hr
-      JOIN houses h ON hr.house_id = h.id
-      WHERE hr.guild_id=$1 AND hr.status='pending'
-    `, [guildId]);
+    if (!hasRole) return interaction.editReply({ embeds: [err("Solo lo STAFF può rimuovere case")] });
     
-    if (!requests.length) return interaction.editReply({ embeds: [err("Nessuna richiesta di casa in sospeso!")] });
-
-    const embed = new EmbedBuilder().setColor(0x3498db).setTitle("🏠 Richieste di Case in Sospeso");
-    requests.forEach((r) => {
-      embed.addFields({ name: `${r.casa_nome}`, value: `💰 ${euros(r.prezzo)} | User ID: ${r.user_id}`, inline: false });
-    });
-
-    return interaction.editReply({ embeds: [embed] });
+    const houseId = interaction.options.getInteger("id", true);
+    const house = await getHouse(houseId, guildId);
+    if (!house) return interaction.editReply({ embeds: [err("Casa non trovata")] });
+    
+    await query("DELETE FROM houses WHERE id=$1 AND guild_id=$2", [houseId, guildId]);
+    
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
+      .setTitle("🗑️ Casa Rimossa")
+      .setDescription(`La casa **${house.name}** è stata rimossa`)] });
   }
 
-  if (commandName === "richieste_auto") {
+  if (commandName === "creauto") {
     const hasRole = member.roles?.cache?.has(CONCESSIONARIO_ROLE_ID);
-    if (!hasRole) return interaction.editReply({ embeds: [err("Solo il Concessionario può vedere le richieste di auto!")] });
-    const { rows: requests } = await query(`
-      SELECT cr.*, c.nome as auto_nome, c.prezzo
-      FROM car_requests cr
-      JOIN cars c ON cr.car_id = c.id
-      WHERE cr.guild_id=$1 AND cr.status='pending'
-    `, [guildId]);
+    if (!hasRole) return interaction.editReply({ embeds: [err("Solo il CONCESSIONARIO può creare auto")] });
     
-    if (!requests.length) return interaction.editReply({ embeds: [err("Nessuna richiesta di auto in sospeso!")] });
+    const nome = interaction.options.getString("nome", true);
+    const prezzoStr = interaction.options.getString("prezzo", true);
+    const prezzo = parsePrice(prezzoStr);
+    const immagine = interaction.options.getAttachment("immagine", true);
+    
+    if (!isImageAttachment(immagine)) return interaction.editReply({ embeds: [err("L'allegato deve essere un'immagine")] });
+    
+    const { rows } = await query(
+      "INSERT INTO cars(guild_id, creator_user_id, name, price, image_url) VALUES($1,$2,$3,$4,$5) RETURNING *",
+      [guildId, user.id, nome, prezzo, immagine.url]
+    );
+    
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xFF4500)
+      .setTitle("🚗 Auto Creata")
+      .addFields(
+        { name: "Nome", value: nome, inline: true },
+        { name: "Prezzo", value: euros(prezzo), inline: true },
+        { name: "ID", value: `#${rows[0].id}`, inline: true }
+      )
+      .setImage(immagine.url)] });
+  }
 
-    const embed = new EmbedBuilder().setColor(0xff6b6b).setTitle("🚗 Richieste di Auto in Sospeso");
-    requests.forEach((r) => {
-      embed.addFields({ name: `${r.auto_nome}`, value: `💰 ${euros(r.prezzo)} | User ID: ${r.user_id}`, inline: false });
-    });
+  if (commandName === "rimuovi-auto") {
+    const hasRole = member.roles?.cache?.has(CONCESSIONARIO_ROLE_ID);
+    if (!hasRole) return interaction.editReply({ embeds: [err("Solo il CONCESSIONARIO può rimuovere auto")] });
+    
+    const carId = interaction.options.getInteger("id", true);
+    const car = await getCar(carId, guildId);
+    if (!car) return interaction.editReply({ embeds: [err("Auto non trovata")] });
+    
+    await query("DELETE FROM cars WHERE id=$1 AND guild_id=$2", [carId, guildId]);
+    
+    return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0xFF4500)
+      .setTitle("🗑️ Auto Rimossa")
+      .setDescription(`L'auto **${car.name}** è stata rimossa`)] });
+  }
 
-    return interaction.editReply({ embeds: [embed] });
+  if (commandName === "richiesta-lavoro") {
+    const position = interaction.options.getString("posizione", true);
+    
+    const embed = new EmbedBuilder()
+      .setColor(0x9B59B6)
+      .setTitle("📋 Richiesta di Lavoro")
+      .setDescription(`${user} ha richiesto la posizione di **${position}**`)
+      .addFields(
+        { name: "👤 Candidato", value: user.toString() },
+        { name: "💼 Posizione", value: position }
+      )
+      .setTimestamp();
+    
+    const approveButton = new ButtonBuilder()
+      .setCustomId(`approve_job_${user.id}_${position}`)
+      .setLabel("✅ Approva")
+      .setStyle(ButtonStyle.Success);
+    
+    const rejectButton = new ButtonBuilder()
+      .setCustomId(`reject_job_${user.id}`)
+      .setLabel("❌ Rifiuta")
+      .setStyle(ButtonStyle.Danger);
+    
+    const row = new ActionRowBuilder().addComponents(approveButton, rejectButton);
+    
+    return interaction.editReply({ embeds: [embed], components: [row] });
   }
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages] });
+async function handleButtonInteraction(interaction) {
+  const { customId, user, guildId } = interaction;
+  
+  if (customId === "view_all_houses") {
+    const houses = await listHouses(guildId);
+    const embed = new EmbedBuilder()
+      .setColor(0xD4AF37)
+      .setTitle("🏡 Tutte le Case")
+      .setDescription(houses.map(h => `#${h.id} • **${h.name}** - ${euros(h.price)}`).join("\n"));
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+  
+  if (customId === "view_all_cars") {
+    const cars = await listCars(guildId);
+    const embed = new EmbedBuilder()
+      .setColor(0xFF4500)
+      .setTitle("🚗 Tutte le Auto")
+      .setDescription(cars.map(c => `#${c.id} • **${c.name}** - ${euros(c.price)}`).join("\n"));
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+  
+  if (customId.startsWith("confirm_pay_")) {
+    const [_, targetId, amount] = customId.split("_");
+    const pendingTx = interaction.client.pendingTransactions?.get(`pay_${user.id}`);
+    
+    if (!pendingTx) return interaction.reply({ content: "❌ Transazione scaduta", ephemeral: true });
+    
+    const mittente = await getAccount(user.id, guildId);
+    if (!mittente || mittente.balance < Number(amount)) {
+      return interaction.reply({ content: "❌ Saldo insufficiente", ephemeral: true });
+    }
+    
+    await query("UPDATE bank_accounts SET balance=balance-$1 WHERE user_id=$2 AND guild_id=$3", [amount, user.id, guildId]);
+    await query("UPDATE bank_accounts SET balance=balance+$1 WHERE user_id=$2 AND guild_id=$3", [amount, targetId, guildId]);
+    await query(
+      "INSERT INTO transactions(from_user_id,to_user_id,guild_id,amount,reason,type) VALUES($1,$2,$3,$4,$5,'pagamento')",
+      [user.id, targetId, guildId, amount, pendingTx.motivo]
+    );
+    
+    interaction.client.pendingTransactions.delete(`pay_${user.id}`);
+    
+    const successEmbed = new EmbedBuilder()
+      .setColor(0x2ecc71)
+      .setTitle("✅ Pagamento Effettuato")
+      .addFields(
+        { name: "Importo", value: euros(amount), inline: true },
+        { name: "A", value: `<@${targetId}>`, inline: true }
+      );
+    
+    return interaction.reply({ embeds: [successEmbed], ephemeral: true });
+  }
+  
+  if (customId === "cancel_pay") {
+    interaction.client.pendingTransactions?.delete(`pay_${user.id}`);
+    return interaction.reply({ content: "❌ Pagamento annullato", ephemeral: true });
+  }
+  
+  if (customId.startsWith("approve_job_")) {
+    const [_, userId, position] = customId.split("_");
+    const embedApprove = new EmbedBuilder()
+      .setColor(0x2ecc71)
+      .setTitle("✅ Richiesta Approvata")
+      .setDescription(`La richiesta di lavoro per **${position}** è stata approvata!`);
+    
+    return interaction.reply({ embeds: [embedApprove], ephemeral: false });
+  }
+  
+  if (customId.startsWith("reject_job_")) {
+    const embedReject = new EmbedBuilder()
+      .setColor(0xe74c3c)
+      .setTitle("❌ Richiesta Rifiutata")
+      .setDescription("La richiesta di lavoro è stata rifiutata");
+    
+    return interaction.reply({ embeds: [embedReject], ephemeral: false });
+  }
+}
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.DirectMessages] });
 
 client.once("ready", async (rc) => {
   console.log(`Bot online: ${rc.user.tag}`);
   await setupDb();
+  for (const guild of rc.guilds.cache.values()) {
+    await seedDefaultSalaries(guild.id);
+  }
   const rest = new REST().setToken(token);
   await rest.put(Routes.applicationCommands(rc.user.id), { body: commands.map(c => c.toJSON()) });
   console.log(`${commands.length} comandi registrati.`);
-  setInterval(() => pagareStipendiGuild(rc).catch(console.error), 60 * 60 * 1000);
-  await pagareStipendiGuild(rc);
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -595,72 +711,8 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       await handleCommand(interaction);
     }
-
     if (interaction.isButton()) {
-      const buttonId = interaction.customId;
-
-      if (buttonId.startsWith("mostra_dettagli_")) {
-        const cardOwnerId = buttonId.split("_")[2];
-        
-        if (interaction.user.id !== cardOwnerId) {
-          return interaction.reply({ content: "❌ Puoi solo vedere i tuoi dettagli!", ephemeral: true });
-        }
-
-        const card = await getCard(interaction.user.id, interaction.guildId);
-        if (!card) {
-          return interaction.reply({ embeds: [err("Carta non trovata.")] , ephemeral: true });
-        }
-
-        const acc = await getAccount(interaction.user.id, interaction.guildId);
-
-        return interaction.reply({
-          embeds: [new EmbedBuilder().setColor(0xD4AF37)
-            .setTitle("💳 Dettagli Carta (Privati)")
-            .addFields(
-              { name: "👤 Nome", value: `${card.nome} ${card.cognome}`, inline: false },
-              { name: "🔐 PIN", value: `**${acc.pin_hash ? "Protetto" : "Non impostato"}**`, inline: false },
-              { name: "💶 Saldo Conto", value: `**${acc.balance} €**`, inline: false },
-              { name: "📅 Data Creazione", value: new Date(card.created_at).toLocaleDateString("it-IT"), inline: false }
-            )
-            .setThumbnail(interaction.user.displayAvatarURL())
-            .setTimestamp()],
-          ephemeral: true
-        });
-      }
-
-      if (buttonId.startsWith("richiedi_casa_")) {
-        const houseId = buttonId.split("_")[2];
-        const { rows: existing } = await query("SELECT * FROM house_requests WHERE user_id=$1 AND guild_id=$2 AND status='pending'", [interaction.user.id, interaction.guildId]);
-        
-        if (existing.length) {
-          return interaction.reply({ embeds: [err("Hai già una richiesta di casa in sospeso!")] , ephemeral: true });
-        }
-
-        await query("INSERT INTO house_requests(user_id, guild_id, house_id, status) VALUES($1, $2, $3, 'pending')", 
-          [interaction.user.id, interaction.guildId, houseId]);
-
-        return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-          .setTitle("🏠 Richiesta Inviata!")
-          .setDescription("La tua richiesta è stata inviata. Aspetta l'approvazione!")
-          .setTimestamp()] , ephemeral: true });
-      }
-
-      if (buttonId.startsWith("richiedi_auto_")) {
-        const carId = buttonId.split("_")[2];
-        const { rows: existing } = await query("SELECT * FROM car_requests WHERE user_id=$1 AND guild_id=$2 AND status='pending'", [interaction.user.id, interaction.guildId]);
-        
-        if (existing.length) {
-          return interaction.reply({ embeds: [err("Hai già una richiesta di auto in sospeso!")] , ephemeral: true });
-        }
-
-        await query("INSERT INTO car_requests(user_id, guild_id, car_id, status) VALUES($1, $2, $3, 'pending')", 
-          [interaction.user.id, interaction.guildId, carId]);
-
-        return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71)
-          .setTitle("🚗 Richiesta Inviata!")
-          .setDescription("La tua richiesta è stata inviata al concessionario!")
-          .setTimestamp()] , ephemeral: true });
-      }
+      await handleButtonInteraction(interaction);
     }
   } catch (e) {
     console.error(e);
