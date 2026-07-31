@@ -13,3 +13,14 @@
     "pg": "^8.13.3"
   }
 }
+{
+  "name": "rp-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.0"
+  }
+}
