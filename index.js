@@ -1184,5 +1184,327 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 });
+const { 
+  Client, 
+  GatewayIntentBits, 
+  Partials,
+  REST,
+  Routes,
+  EmbedBuilder,
+  PermissionsBitField,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  SlashCommandBuilder 
+} = require('discord.js');
+
+const TOKEN = process.env.TOKEN;          // metti il token in env
+const CLIENT_ID = process.env.CLIENT_ID;  // ID del bot
+const GUILD_ID = process.env.GUILD_ID;    // opzionale: per registrare i comandi in una sola guild
+
+// CONFIG BASE (puoi spostarla in config.json)
+const OWNER_ID = 'TUO_USER_ID';           // chi riceve i DM di /suggerisci
+const STAFF_ROLE_ID = 'ID_RUOLO_STAFF';   // chi può approvare/rifiutare
+const LOG_CHANNEL_ID = 'ID_CANAL_LOG';    // dove loggare i suggerimenti
+
+// Map per configurazione RP per ogni server
+const rpConfig = new Map(); 
+// struttura: rpConfig.set(guildId, { start: {...}, end: {...} });
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.DirectMessages
+  ],
+  partials: [Partials.Channel]
+});
+
+// ---------------------- REGISTRAZIONE SLASH COMMANDS ----------------------
+
+const commands = [
+  // /stafflist
+  new SlashCommandBuilder()
+    .setName('stafflist')
+    .setDescription('Mostra la lista utenti con un ruolo specifico')
+    .addRoleOption(opt =>
+      opt.setName('ruolo')
+        .setDescription('Ruolo da mostrare')
+        .setRequired(true)
+    ),
+
+  // /setup_inizio_rp
+  new SlashCommandBuilder()
+    .setName('setup_inizio_rp')
+    .setDescription('Configura il messaggio per /inizio_rp')
+    .addStringOption(opt =>
+      opt.setName('titolo')
+        .setDescription('Titolo embed')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('messaggio')
+        .setDescription('Descrizione embed')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('colore')
+        .setDescription('Colore embed (es. #ff0000)')
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName('immagine')
+        .setDescription('URL immagine opzionale')
+        .setRequired(false)
+    ),
+
+  // /setup_fine_rp
+  new SlashCommandBuilder()
+    .setName('setup_fine_rp')
+    .setDescription('Configura il messaggio per /fine_rp')
+    .addStringOption(opt =>
+      opt.setName('titolo')
+        .setDescription('Titolo embed')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('messaggio')
+        .setDescription('Descrizione embed')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('colore')
+        .setDescription('Colore embed (es. #00ff00)')
+        .setRequired(false)
+    )
+    .addStringOption(opt =>
+      opt.setName('immagine')
+        .setDescription('URL immagine opzionale')
+        .setRequired(false)
+    ),
+
+  // /inizio_rp
+  new SlashCommandBuilder()
+    .setName('inizio_rp')
+    .setDescription('Invia il messaggio di inizio RP'),
+
+  // /fine_rp
+  new SlashCommandBuilder()
+    .setName('fine_rp')
+    .setDescription('Invia il messaggio di fine RP'),
+
+  // /suggerisci
+  new SlashCommandBuilder()
+    .setName('suggerisci')
+    .setDescription('Invia un suggerimento allo staff')
+    .addStringOption(opt =>
+      opt.setName('testo')
+        .setDescription('Testo del suggerimento')
+        .setRequired(true)
+    )
+].map(cmd => cmd.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+async function registerCommands() {
+  try {
+    console.log('Registrazione comandi slash...');
+    if (GUILD_ID) {
+      await rest.put(
+        Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+        { body: commands }
+      );
+    } else {
+      await rest.put(
+        Routes.applicationCommands(CLIENT_ID),
+        { body: commands }
+      );
+    }
+    console.log('Comandi registrati.');
+  } catch (err) {
+    console.error('Errore registrazione comandi:', err);
+  }
+}
+
+// ---------------------- READY ----------------------
+
+client.once('ready', () => {
+  console.log(`Loggato come ${client.user.tag}`);
+  registerCommands();
+});
+
+// ---------------------- STAFFLIST ----------------------
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName } = interaction;
+
+  // /stafflist
+  if (commandName === 'stafflist') {
+    const role = interaction.options.getRole('ruolo');
+
+    await interaction.deferReply({ ephemeral: true });
+
+    await interaction.guild.members.fetch(); // assicura cache membri
+
+    const membersWithRole = interaction.guild.members.cache.filter(m => 
+      m.roles.cache.has(role.id)
+    );
+
+    if (!membersWithRole.size) {
+      return interaction.editReply(`Nessun utente con il ruolo ${role.name}.`);
+    }
+
+    let descrizione = '';
+    membersWithRole.forEach(member => {
+      const presence = member.presence;
+      const status = presence ? presence.status : 'offline';
+      let statoLabel;
+      switch (status) {
+        case 'online': statoLabel = '🟢 Online'; break;
+        case 'idle': statoLabel = '🟡 Assente'; break;
+        case 'dnd': statoLabel = '🔴 Non disturbare'; break;
+        default: statoLabel = '⚫ Offline';
+      }
+      descrizione += `${member.user.tag} — ${statoLabel}\n`;
+    });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Staff con ruolo: ${role.name}`)
+      .setDescription(descrizione)
+      .setColor(0x00AEFF);
+
+    return interaction.editReply({ embeds: [embed] });
+  }
+
+  // ---------------------- SETUP INIZIO RP ----------------------
+
+  if (commandName === 'setup_inizio_rp') {
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return interaction.reply({ content: 'Solo admin possono usare questo comando.', ephemeral: true });
+    }
+
+    const titolo = interaction.options.getString('titolo');
+    const messaggio = interaction.options.getString('messaggio');
+    const colore = interaction.options.getString('colore') || '#00AEFF';
+    const immagine = interaction.options.getString('immagine') || null;
+
+    const guildId = interaction.guild.id;
+    const current = rpConfig.get(guildId) || {};
+    current.start = { titolo, messaggio, colore, immagine };
+    rpConfig.set(guildId, current);
+
+    return interaction.reply({ content: 'Configurazione **inizio RP** salvata.', ephemeral: true });
+  }
+
+  // ---------------------- SETUP FINE RP ----------------------
+
+  if (commandName === 'setup_fine_rp') {
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return interaction.reply({ content: 'Solo admin possono usare questo comando.', ephemeral: true });
+    }
+
+    const titolo = interaction.options.getString('titolo');
+    const messaggio = interaction.options.getString('messaggio');
+    const colore = interaction.options.getString('colore') || '#00AEFF';
+    const immagine = interaction.options.getString('immagine') || null;
+
+    const guildId = interaction.guild.id;
+    const current = rpConfig.get(guildId) || {};
+    current.end = { titolo, messaggio, colore, immagine };
+    rpConfig.set(guildId, current);
+
+    return interaction.reply({ content: 'Configurazione **fine RP** salvata.', ephemeral: true });
+  }
+
+  // ---------------------- INIZIO RP ----------------------
+
+  if (commandName === 'inizio_rp') {
+    const guildId = interaction.guild.id;
+    const config = rpConfig.get(guildId)?.start;
+
+    if (!config) {
+      return interaction.reply({ content: 'Nessuna configurazione per **inizio RP**. Usa /setup_inizio_rp.', ephemeral: true });
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(config.titolo)
+      .setDescription(config.messaggio)
+      .setColor(config.colore ? parseInt(config.colore.replace('#', ''), 16) : 0x00AEFF);
+
+    if (config.immagine) embed.setImage(config.immagine);
+
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ---------------------- FINE RP ----------------------
+
+  if (commandName === 'fine_rp') {
+    const guildId = interaction.guild.id;
+    const config = rpConfig.get(guildId)?.end;
+
+    if (!config) {
+      return interaction.reply({ content: 'Nessuna configurazione per **fine RP**. Usa /setup_fine_rp.', ephemeral: true });
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(config.titolo)
+      .setDescription(config.messaggio)
+      .setColor(config.colore ? parseInt(config.colore.replace('#', ''), 16) : 0x00AEFF);
+
+    if (config.immagine) embed.setImage(config.immagine);
+
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ---------------------- SUGGERISCI ----------------------
+
+  if (commandName === 'suggerisci') {
+    const testo = interaction.options.getString('testo');
+
+    // DM a te (OWNER_ID)
+    try {
+      const owner = await client.users.fetch(OWNER_ID);
+      await owner.send(`Nuovo suggerimento da ${interaction.user.tag}:\n${testo}`);
+    } catch (err) {
+      console.error('Errore invio DM:', err);
+    }
+
+    // Log nel canale
+    try {
+      const logChannel = await client.channels.fetch(LOG_CHANNEL_ID);
+      if (logChannel && logChannel.isTextBased()) {
+        await logChannel.send(`📩 Suggerimento da **${interaction.user.tag}**:\n${testo}`);
+      }
+    } catch (err) {
+      console.error('Errore invio log:', err);
+    }
+
+    return interaction.reply({ content: 'Suggerimento inviato allo staff. Grazie!', ephemeral: true });
+  }
+});
+
+// ---------------------- APPROVA / RIFIUTA POST ----------------------
+
+// Ogni messaggio in qualsiasi canale → il bot aggiunge bottoni
+client.on('messageCreate', async message => {
+  // ignora bot
+  if (message.author.bot) return;
+
+  // qui puoi filtrare canali se vuoi (es. solo forum / solo un canale)
+  // if (message.channel.id !== 'ID_CANAL_POST') return;
+
+  const row = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`approva_${message.id}`)
+        .setLabel('Approva')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`rifiuta_${message
 
 client.login(token);
